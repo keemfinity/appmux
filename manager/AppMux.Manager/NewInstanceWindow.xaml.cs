@@ -149,10 +149,14 @@ public partial class NewInstanceWindow
         if (_analysis is null) return;
         var warning = new Wpf.Ui.Controls.MessageBox
         {
-            Title = "Strong isolation requires a Windows account",
-            Content = "No verified profile recipe exists for this app. AppMux recommends one " +
-                      "hidden standard local account for a genuine separate HKCU and AppData. " +
-                      "Windows will request administrator approval. No service or driver is installed.",
+            Title = "Native isolation requires a Windows profile",
+            Content = "This app needs one hidden standard local account for a genuine separate " +
+                      "Windows profile. " +
+                      "If the app is installed only for your account, AppMux mirrors a private " +
+                      "runnable copy into that isolated profile. Some Electron apps also require a " +
+                      "matching official Electron runtime, downloaded with a pinned SHA-256. Windows " +
+                      "will request administrator approval. No service or driver is installed, and " +
+                      "the original app is unchanged.",
             PrimaryButtonText = "Continue",
             CloseButtonText = "Cancel",
         };

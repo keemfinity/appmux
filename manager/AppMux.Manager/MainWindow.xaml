@@ -152,6 +152,7 @@
                                             Visibility="{Binding CanEnableStrongIsolation, Converter={StaticResource BoolToVisibilityConverter}}" />
                                         <ui:Button
                                             Appearance="Secondary"
+                                            Click="OnMore"
                                             Content="•••"
                                             Tag="{Binding}"
                                             ToolTip="More actions">

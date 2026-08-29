@@ -32,6 +32,18 @@ pub struct Recipe {
     #[serde(default)]
     pub prefer_web: bool,
     #[serde(default)]
+    pub prefer_tier_c: bool,
+    #[serde(default)]
+    pub tier_c_user_data_dir: Option<String>,
+    #[serde(default)]
+    pub tier_c_electron_host: Option<String>,
+    #[serde(default)]
+    pub tier_c_electron_app: Option<String>,
+    #[serde(default)]
+    pub tier_c_electron_sha256: Option<String>,
+    #[serde(default)]
+    pub tier_c_electron_exe_sha256: Option<String>,
+    #[serde(default)]
     pub notes: String,
 }
 
@@ -82,6 +94,10 @@ mod tests {
         let chatgpt = recipes.iter().find(|r| r.id == "chatgpt").unwrap();
         assert_eq!(chatgpt.web_url.as_deref(), Some("https://chatgpt.com/"));
         assert!(chatgpt.prefer_web);
+        let slack = recipes.iter().find(|r| r.id == "slack").unwrap();
+        assert!(slack.prefer_tier_c);
+        assert_eq!(slack.tier_c_electron_host.as_deref(), Some("43.4.0"));
+        assert_eq!(slack.tier_c_electron_app.as_deref(), Some("slack.exe"));
         for r in &recipes {
             assert!(
                 matches!(
@@ -123,6 +139,12 @@ pub fn generic(app_id: &str, display: &str) -> Recipe {
         env: Default::default(),
         web_url: None,
         prefer_web: false,
+        prefer_tier_c: false,
+        tier_c_user_data_dir: None,
+        tier_c_electron_host: None,
+        tier_c_electron_app: None,
+        tier_c_electron_sha256: None,
+        tier_c_electron_exe_sha256: None,
         notes: "Generic environment redirection. Isolation may be partial: apps that resolve \
                 known folders through the Windows shell API ignore environment variables."
             .to_string(),

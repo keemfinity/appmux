@@ -231,6 +231,8 @@ enum PackageLabCmd {
 
 #[derive(Subcommand)]
 enum TierCCmd {
+    #[command(hide = true)]
+    InitProfile,
     /// Provision the instance account (requires elevation; no app ACL changes)
     Prepare {
         #[arg(long)]
@@ -244,6 +246,23 @@ enum TierCCmd {
         app: String,
         #[arg(long)]
         instance: String,
+    },
+    Stop {
+        #[arg(long)]
+        app: String,
+        #[arg(long)]
+        instance: String,
+    },
+    /// Delete an AppMux-managed hidden account and remove its instance record
+    Remove {
+        #[arg(long)]
+        app: String,
+        #[arg(long)]
+        instance: String,
+        #[arg(long)]
+        purge: bool,
+        #[arg(long)]
+        confirm_remove: bool,
     },
 }
 
@@ -426,6 +445,21 @@ fn analyze(target: &str) -> Result<AutoAnalysis> {
     }
     if plan.recipe.prefer_web && plan.recipe.web_url.is_some() {
         return Ok(web_analysis(&plan, plan.recipe.notes.clone()));
+    }
+    if plan.recipe.prefer_tier_c {
+        return Ok(AutoAnalysis {
+            app_id: plan.app_id,
+            display: plan.display,
+            route: "tier-c".into(),
+            confidence: plan.recipe.status,
+            packaged: false,
+            requires_elevation: true,
+            requires_package_consent: false,
+            strip_services: false,
+            web_url: None,
+            reason: plan.recipe.notes,
+            warnings: Vec::new(),
+        });
     }
     if plan.recipe.status == "blocked" {
         return Ok(AutoAnalysis {
@@ -681,6 +715,12 @@ fn run(
         return Ok(());
     }
 
+    if plan.recipe.prefer_tier_c && inst.isolation != "account" {
+        bail!(
+            "'{}' requires its verified private Windows-profile route; complete Tier C setup in AppMux Manager",
+            plan.display
+        );
+    }
     if plan.recipe.status == "unverified" && console::has_console() {
         console::warn(&format!(
             "no verified recipe for '{}'; using generic environment redirection. {}",
@@ -745,7 +785,10 @@ fn stop(app: &str, instance: &str) -> Result<()> {
     match stored.isolation.as_str() {
         "package" => package_lab::stop_instance(&stored)?,
         "web" => web_app::stop(&stored)?,
-        _ => bail!("Stop is currently supported for Package Lab and App Web instances"),
+        "account" => account::stop(&stored, &launch::plan(&stored.app_path)?)?,
+        _ => bail!(
+            "Stop is currently supported for isolated Package, Web, and Windows-profile instances"
+        ),
     }
     console::info(&format!("Stopped all processes for {app} / {instance}."));
     Ok(())
@@ -767,6 +810,9 @@ fn remove(app: &str, instance: &str, purge: bool) -> Result<()> {
         bail!("no instance '{instance}' for app '{app}'");
     }
     if let Some(stored) = &removed {
+        if stored.isolation == "account" {
+            bail!("managed Windows-profile instances must be removed with 'appmux tier-c remove'");
+        }
         if stored.isolation == "web" {
             web_app::stop(stored)?;
         }
@@ -1035,8 +1081,12 @@ fn package_lab_command(cmd: PackageLabCmd) -> Result<()> {
 }
 
 fn tier_c(cmd: TierCCmd) -> Result<()> {
+    if let TierCCmd::InitProfile = &cmd {
+        return account::initialize_known_folders();
+    }
     let mut db = Db::load()?;
     match cmd {
+        TierCCmd::InitProfile => unreachable!(),
         TierCCmd::Prepare { app, instance } => {
             let inst = db
                 .find(&app, &instance)
@@ -1048,7 +1098,8 @@ fn tier_c(cmd: TierCCmd) -> Result<()> {
                      session; Windows denies cross-user package activation"
                 );
             }
-            let username = account::provision(&inst)?;
+            let plan = launch::plan(&inst.app_path)?;
+            let username = account::provision(&inst, &plan)?;
             let saved = db.find(&app, &instance).expect("instance disappeared");
             saved.isolation = "account".to_string();
             saved.windows_user = Some(username.clone());
@@ -1071,6 +1122,39 @@ fn tier_c(cmd: TierCCmd) -> Result<()> {
                 console::info("Tier C: not provisioned (recipe isolation active)");
             }
             Ok(())
+        }
+        TierCCmd::Stop { app, instance } => {
+            let inst = db
+                .find(&app, &instance)
+                .ok_or_else(|| anyhow::anyhow!("no instance '{instance}' for app '{app}'"))?;
+            let plan = launch::plan(&inst.app_path)?;
+            account::stop(inst, &plan)
+        }
+        TierCCmd::Remove {
+            app,
+            instance,
+            purge,
+            confirm_remove,
+        } => {
+            anyhow::ensure!(
+                confirm_remove,
+                "Tier C account removal requires --confirm-remove"
+            );
+            let inst = db
+                .find(&app, &instance)
+                .ok_or_else(|| anyhow::anyhow!("no instance '{instance}' for app '{app}'"))?
+                .clone();
+            anyhow::ensure!(
+                inst.isolation == "account",
+                "instance is not using a managed Windows profile"
+            );
+            account::remove(&inst)?;
+            let saved = db.find(&app, &instance).expect("instance disappeared");
+            saved.isolation = "recipe".to_string();
+            saved.windows_user = None;
+            db.save()?;
+            drop(db);
+            remove(&app, &instance, purge)
         }
     }
 }

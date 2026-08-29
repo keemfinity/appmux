@@ -12,7 +12,8 @@ public sealed class InstanceRow
     public ImageSource? Icon { get; init; }
     public bool CanEnableStrongIsolation => Model.Isolation == "recipe";
     public bool IsPackage => Model.Isolation == "package";
-    public bool IsStoppable => Model.Isolation is "package" or "web";
+    public bool IsAccount => Model.Isolation == "account";
+    public bool IsStoppable => Model.Isolation is "package" or "web" or "account";
     public required string Meta { get; init; }
 }
 
@@ -49,7 +50,9 @@ public partial class MainWindow
             {
                 Model = i,
                 Icon = Core.IconForInstance(i),
-                Meta = $"{Core.FormatSize(size)}  ·  {i.Isolation switch { "account" => "Private Windows profile", "package" => "Private app profile", "web" => "Private web profile", _ => "Private app profile" }}  ·  Used {Core.FormatAgo(i.LastUsed)}",
+                Meta = i.Isolation == "account"
+                    ? $"Private Windows profile  ·  Used {Core.FormatAgo(i.LastUsed)}"
+                    : $"{Core.FormatSize(size)}  ·  {i.Isolation switch { "package" => "Private app profile", "web" => "Private web profile", _ => "Private app profile" }}  ·  Used {Core.FormatAgo(i.LastUsed)}",
             };
         }).ToList());
 
@@ -90,6 +93,13 @@ public partial class MainWindow
             await RefreshAsync();
     }
 
+    private void OnMore(object sender, RoutedEventArgs e)
+    {
+        if (sender is not Button button || button.ContextMenu is null) return;
+        button.ContextMenu.PlacementTarget = button;
+        button.ContextMenu.IsOpen = true;
+    }
+
     private async void OnDelete(object sender, RoutedEventArgs e)
     {
         if ((sender as FrameworkElement)?.Tag is not InstanceRow row) return;
@@ -101,10 +111,15 @@ public partial class MainWindow
                 ? "AppMux will stop this clone's background processes and uninstall its copied " +
                   "Windows package. The vendor app is not affected.\n\n'Uninstall + wipe profile' " +
                   "also permanently deletes this instance's saved login and settings."
-                : $"Remove the {row.AppDisplay} instance '{row.Model.Name}'?\n\n" +
-                  "'Remove + wipe data' also deletes its logins and settings permanently.",
-            PrimaryButtonText = row.IsPackage ? "Uninstall; keep profile" : "Remove only",
-            SecondaryButtonText = row.IsPackage ? "Uninstall + wipe profile" : "Remove + wipe data",
+                : row.IsAccount
+                    ? "AppMux will ask for administrator approval, remove this instance's hidden " +
+                      "Windows account and private Windows profile, including its private app/runtime copies. " +
+                      "The original app and your Windows account are not affected.\n\n'Wipe app data' " +
+                      "also deletes the AppMux-owned instance folder."
+                    : $"Remove the {row.AppDisplay} instance '{row.Model.Name}'?\n\n" +
+                      "'Remove + wipe data' also deletes its logins and settings permanently.",
+            PrimaryButtonText = row.IsPackage ? "Uninstall; keep profile" : row.IsAccount ? "Remove profile" : "Remove only",
+            SecondaryButtonText = row.IsPackage ? "Uninstall + wipe profile" : row.IsAccount ? "Remove + wipe app data" : "Remove + wipe data",
             CloseButtonText = "Cancel",
         };
         var result = await box.ShowDialogAsync();
@@ -116,12 +131,40 @@ public partial class MainWindow
                 "package-lab", "uninstall", "--app", row.Model.AppId,
                 "--instance", row.Model.Name, "--confirm-uninstall",
             }
-            : new List<string> { "remove", "--app", row.Model.AppId, "--instance", row.Model.Name };
+            : row.IsAccount
+                ? new List<string>
+                {
+                    "tier-c", "remove", "--app", row.Model.AppId,
+                    "--instance", row.Model.Name, "--confirm-remove",
+                }
+                : new List<string> { "remove", "--app", row.Model.AppId, "--instance", row.Model.Name };
         if (result == Wpf.Ui.Controls.MessageBoxResult.Secondary) args.Add("--purge");
 
-        var (code, output) = await Core.RunAppmuxAsync(args.ToArray());
-        if (code != 0)
-            await ShowErrorAsync("Remove failed", output);
+        if (row.IsAccount)
+        {
+            var stop = await Core.RunAppmuxAsync(
+                "stop", "--app", row.Model.AppId, "--instance", row.Model.Name);
+            if (stop.Code != 0)
+            {
+                await ShowErrorAsync("Remove failed", stop.Output);
+                return;
+            }
+            var code = await Core.RunElevatedAppmuxAsync(args.ToArray());
+            if (code == 1223)
+            {
+                await Core.RunAppmuxAsync(
+                    "run", "--target", row.Model.AppPath,
+                    "--app", row.Model.AppId, "--instance", row.Model.Name);
+                return;
+            }
+            if (code != 0)
+                await ShowErrorAsync("Remove failed", $"Elevated helper exited with code {code}.");
+        }
+        else
+        {
+            var (code, output) = await Core.RunAppmuxAsync(args.ToArray());
+            if (code != 0) await ShowErrorAsync("Remove failed", output);
+        }
         await RefreshAsync();
     }
 
@@ -135,8 +178,11 @@ public partial class MainWindow
                       "standard local account for this instance, and pre-warm its profile. " +
                       "That gives the app a real separate HKCU registry and AppData.\n\n" +
                       "No target files, WindowsApps ACLs, services, or drivers are modified. " +
-                      "The account receives a random DPAPI-protected password. This instance " +
-                      "will start with fresh settings and require login once.",
+                      "If the app is installed only for your Windows account, AppMux mirrors a " +
+                      "private runnable copy into the isolated account's own Windows profile. Some " +
+                      "Electron apps also use a matching official runtime verified by pinned SHA-256. " +
+                      "The account receives a random DPAPI-protected password. This instance starts " +
+                      "with fresh settings and requires login once.",
             PrimaryButtonText = "Continue",
             CloseButtonText = "Cancel",
         };

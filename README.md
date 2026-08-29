@@ -33,8 +33,10 @@ Isolation is tiered per app, driven by a recipe database:
   the Windows shell API (`SHGetKnownFolderPath`) ignore environment variables —
   most Electron apps do this, which is why Electron apps need Tier A recipes.
   Unverified apps get a warning.
-- **Tier C — hidden local user account per instance** *(planned)*: real
-  separate HKCU registry and user profile for classic Win32 apps.
+- **Tier C — hidden local user account per instance** *(experimental)*: real
+  separate HKCU registry and user profile for classic Win32 apps. Per-user-only
+  installations are mirrored into the hidden account's matching profile path so
+  the app sees the directory structure it expects without accessing the owner's profile.
 
 ## Manager app
 
@@ -139,8 +141,19 @@ appmux tier-c status  --app <app-id> --instance <name>
 
 The manager's shield button performs the same operation with a UAC prompt. It
 creates one hidden **standard** local account per instance, generates a random
-password protected with Windows DPAPI, and pre-warms the profile. It does not
-change target-app or WindowsApps ACLs and installs no service or driver.
+password protected with Windows DPAPI, initializes Windows Shell known folders,
+and corrects the alternate-user environment before launch. Per-user applications
+are mirrored to the equivalent path in the hidden profile. Managed launches use
+a named Windows job so Stop terminates only that instance and all of its child
+processes. It does not change target-app or WindowsApps ACLs and installs no
+service or driver.
+
+Slack 4.51.191 is verified through Tier C. Slack hardcodes Electron's singleton
+and ignores Chromium profile flags, so AppMux hosts its unchanged `app.asar` in
+the matching official Electron 43.4.0 runtime inside the hidden profile. The
+runtime download is pinned to the vendor SHA-256. Original Slack and the isolated
+Slack window run together with separate HKCU, AppData, Crashpad, and process jobs;
+no Slack binary or application archive is patched or injected.
 
 ### Package Lab (experimental packaged-app instances)
 
