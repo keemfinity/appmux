@@ -178,10 +178,10 @@ public partial class NewInstanceWindow
             "tier-c", "prepare", "--app", _analysis.AppId, "--instance", name);
         if (elevated != 0)
         {
-            await Core.RunAppmuxAsync("remove", "--app", _analysis.AppId, "--instance", name);
             CreateButton.IsEnabled = true;
             CreateButton.Content = "Create and launch";
-            if (elevated != 1223) ShowError($"Strong isolation setup failed ({elevated}).");
+            if (elevated != 1223)
+                ShowError($"Strong isolation setup failed ({elevated}). The instance card was kept so setup can be retried.");
             return;
         }
         var launch = await Core.RunAppmuxAsync(

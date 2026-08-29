@@ -732,7 +732,7 @@ fn copy_install_tree(source: &Path, destination: &Path) -> Result<()> {
 fn sha256_file(path: &Path) -> Result<String> {
     let mut file = std::fs::File::open(path)?;
     let mut digest = Sha256::new();
-    let mut buffer = [0u8; 1024 * 1024];
+    let mut buffer = vec![0u8; 1024 * 1024];
     loop {
         let read = file.read(&mut buffer)?;
         if read == 0 {
@@ -1154,6 +1154,17 @@ mod tests {
     fn tier_c_profile_root_is_absolute() {
         assert!(profile_root("test-account").is_absolute());
         assert!(profile_root("test-account").ends_with(r"Users\test-account"));
+    }
+
+    #[test]
+    fn hashes_files_without_using_the_process_stack_for_the_buffer() {
+        let path = std::env::temp_dir().join(format!("appmux-sha-{}.tmp", std::process::id()));
+        std::fs::write(&path, b"abc").unwrap();
+        assert_eq!(
+            sha256_file(&path).unwrap(),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+        std::fs::remove_file(path).unwrap();
     }
 
     #[test]
