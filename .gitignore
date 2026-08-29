@@ -1,0 +1,5 @@
+/target
+**/*.rs.bk
+manager/**/bin/
+manager/**/obj/
+manager/publish/

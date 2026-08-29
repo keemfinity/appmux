@@ -1,0 +1,86 @@
+<ui:FluentWindow
+    x:Class="AppMux.Manager.SettingsWindow"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:ui="http://schemas.lepo.co/wpfui/2022/xaml"
+    Title="Settings — AppMux"
+    Icon="Assets/AppMux.ico"
+    Width="570"
+    Height="640"
+    MinWidth="500"
+    MinHeight="520"
+    ExtendsContentIntoTitleBar="True"
+    WindowBackdropType="Acrylic"
+    WindowCornerPreference="Round"
+    WindowStartupLocation="CenterOwner">
+    <Grid>
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+            <RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
+        <ui:TitleBar Grid.Row="0" Title="AppMux Settings" ShowMaximize="False" ShowMinimize="False" />
+        <ScrollViewer Grid.Row="1" Margin="22,8,22,0" VerticalScrollBarVisibility="Auto">
+            <StackPanel>
+                <StackPanel Margin="0,0,0,18" Orientation="Horizontal">
+                    <Image Width="48" Height="48" Margin="0,0,12,0" RenderOptions.BitmapScalingMode="HighQuality" SnapsToDevicePixels="True" Source="{StaticResource AppMuxLogoImage}" />
+                    <StackPanel VerticalAlignment="Center">
+                        <TextBlock FontSize="23" FontWeight="SemiBold" Text="Settings" />
+                        <TextBlock FontSize="12" Foreground="{DynamicResource SubtleTextBrush}" Text="Layered app instances, configured your way." />
+                    </StackPanel>
+                </StackPanel>
+
+                <Border Style="{StaticResource GlassCard}">
+                    <StackPanel>
+                        <TextBlock FontSize="16" FontWeight="SemiBold" Text="Appearance" />
+                        <TextBlock Margin="0,3,0,10" FontSize="12" Foreground="{DynamicResource SubtleTextBrush}" Text="Follow Windows or choose a permanent theme." />
+                        <ComboBox x:Name="ThemeBox" Width="200" HorizontalAlignment="Left" SelectionChanged="OnThemeChanged">
+                            <ComboBoxItem Content="Use system setting" Tag="System" />
+                            <ComboBoxItem Content="Dark" Tag="Dark" />
+                            <ComboBoxItem Content="Light" Tag="Light" />
+                        </ComboBox>
+                    </StackPanel>
+                </Border>
+
+                <Border Style="{StaticResource GlassCard}">
+                    <StackPanel>
+                        <TextBlock FontSize="16" FontWeight="SemiBold" Text="Windows integration" />
+                        <TextBlock Margin="0,3,0,10" FontSize="12" Foreground="{DynamicResource SubtleTextBrush}" Text="Repair Explorer actions and OAuth/deep-link routing." />
+                        <WrapPanel>
+                            <ui:Button Margin="0,0,8,8" Click="OnSyncMenu" Content="Sync right-click menu" Icon="{ui:SymbolIcon ArrowSync24}" />
+                            <ui:Button Margin="0,0,0,8" Click="OnSyncProtocols" Content="Sync protocol router" Icon="{ui:SymbolIcon ArrowSync24}" />
+                        </WrapPanel>
+                    </StackPanel>
+                </Border>
+
+                <Border Style="{StaticResource GlassCard}">
+                    <StackPanel>
+                        <TextBlock FontSize="16" FontWeight="SemiBold" Text="Developer mode" />
+                        <TextBlock Margin="0,3,0,8" FontSize="12" Foreground="{DynamicResource SubtleTextBrush}" Text="Allows explicit Package Lab and guardrail testing. Safety confirmations remain required." TextWrapping="Wrap" />
+                        <CheckBox x:Name="DevModeCheck" Click="OnDeveloperMode" Content="Enable developer mode" />
+                    </StackPanel>
+                </Border>
+
+                <Border Style="{StaticResource GlassCard}">
+                    <Grid>
+                        <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
+                        <StackPanel Grid.Column="0">
+                            <TextBlock FontSize="16" FontWeight="SemiBold" Text="AppMux data" />
+                            <TextBlock x:Name="DataPathText" Margin="0,3,12,0" FontSize="11" Foreground="{DynamicResource SubtleTextBrush}" TextTrimming="CharacterEllipsis" />
+                        </StackPanel>
+                        <ui:Button Grid.Column="1" VerticalAlignment="Center" Click="OnOpenData" Content="Open folder" Icon="{ui:SymbolIcon FolderOpen24}" />
+                    </Grid>
+                </Border>
+
+                <Border Style="{StaticResource GlassCard}">
+                    <StackPanel>
+                        <TextBlock FontSize="16" FontWeight="SemiBold" Text="About AppMux" />
+                        <TextBlock Margin="0,3,0,0" FontSize="12" Foreground="{DynamicResource SubtleTextBrush}" Text="Version 0.1.0 · Layered app instances, simplified." />
+                        <TextBlock Margin="0,3,0,0" FontSize="11" Foreground="{DynamicResource SubtleTextBrush}" Text="Documented Windows APIs only · No injection · No permanent service" />
+                    </StackPanel>
+                </Border>
+            </StackPanel>
+        </ScrollViewer>
+        <TextBlock x:Name="StatusText" Grid.Row="2" Margin="22,10,22,16" FontSize="11" Foreground="{DynamicResource AccentTextBrush}" />
+    </Grid>
+</ui:FluentWindow>

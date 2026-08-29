@@ -1,0 +1,107 @@
+[
+  {
+    "id": "discord",
+    "display": "Discord",
+    "match_exe": ["discord.exe", "discordptb.exe", "discordcanary.exe"],
+    "match_name": ["discord"],
+    "status": "verified",
+    "args": ["--multi-instance"],
+    "env": { "DISCORD_USER_DATA_DIR": "{data}\\UserData" },
+    "redirect_env": ["TEMP"],
+    "notes": "Discord resolves AppData via the shell API (ignores env redirection) but honors DISCORD_USER_DATA_DIR plus --multi-instance; Squirrel Update.exe passes both through."
+  },
+  {
+    "id": "telegram",
+    "display": "Telegram Desktop",
+    "match_exe": ["telegram.exe"],
+    "match_name": ["telegram"],
+    "status": "verified",
+    "args": ["-many", "-workdir", "{data}\\tdata"],
+    "notes": "Native multi-instance support via -many/-workdir."
+  },
+  {
+    "id": "code",
+    "display": "Visual Studio Code",
+    "match_exe": ["code.exe", "code - insiders.exe"],
+    "status": "verified",
+    "args": ["--user-data-dir", "{data}\\UserData", "--extensions-dir", "{data}\\Extensions"],
+    "notes": "Fully supported by VS Code's own CLI flags."
+  },
+  {
+    "id": "chrome",
+    "display": "Google Chrome",
+    "match_exe": ["chrome.exe"],
+    "status": "verified",
+    "args": ["--user-data-dir={data}\\Profile"],
+    "notes": "Separate user data dir defeats the process singleton and isolates the profile."
+  },
+  {
+    "id": "msedge",
+    "display": "Microsoft Edge",
+    "match_exe": ["msedge.exe"],
+    "status": "verified",
+    "args": ["--user-data-dir={data}\\Profile"]
+  },
+  {
+    "id": "firefox",
+    "display": "Mozilla Firefox",
+    "match_exe": ["firefox.exe"],
+    "status": "verified",
+    "args": ["-profile", "{data}\\Profile", "-no-remote"],
+    "notes": "Firefox initializes the profile directory on first run."
+  },
+  {
+    "id": "slack",
+    "display": "Slack",
+    "match_exe": ["slack.exe"],
+    "match_name": ["slack"],
+    "status": "unverified",
+    "redirect_env": ["APPDATA", "LOCALAPPDATA", "TEMP"],
+    "notes": "Unverified: Electron apps typically resolve AppData via the shell API, which ignores env redirection. Deep links (slack://) route to whichever instance registered last."
+  },
+  {
+    "id": "signal",
+    "display": "Signal",
+    "match_exe": ["signal.exe"],
+    "match_name": ["signal"],
+    "status": "unverified",
+    "redirect_env": ["APPDATA", "LOCALAPPDATA", "TEMP"],
+    "notes": "Unverified: Electron apps typically resolve AppData via the shell API, which ignores env redirection."
+  },
+  {
+    "id": "chatgpt",
+    "display": "ChatGPT",
+    "match_exe": ["chatgpt.exe"],
+    "status": "blocked",
+    "web_url": "https://chatgpt.com/",
+    "prefer_web": true,
+    "notes": "The desktop package declares appLicensing and stores auth outside Chromium's profile. AppMux uses the verified official web app for compliant multi-account isolation."
+  },
+  {
+    "id": "claude",
+    "display": "Claude",
+    "match_exe": ["claude.exe"],
+    "status": "partial",
+    "args": ["--user-data-dir={data}\\UserData"],
+    "notes": "Claude's packaged CoworkVMService is system-wide. Package Lab can create a service-free chat instance; Cowork/VM is disabled and native browser/Office integration may remain shared."
+  },
+  {
+    "id": "spotify",
+    "display": "Spotify",
+    "match_exe": ["spotify.exe"],
+    "status": "partial",
+    "args": ["--user-data-dir={data}\\Profile"],
+    "web_url": "https://open.spotify.com/",
+    "prefer_web": true,
+    "notes": "Spotify's desktop singleton prevents side-by-side instances. AppMux uses the verified official web player for simultaneous accounts."
+  },
+  {
+    "id": "notepad++",
+    "display": "Notepad++",
+    "match_exe": ["notepad++.exe"],
+    "status": "partial",
+    "args": ["-multiInst"],
+    "redirect_env": ["APPDATA"],
+    "notes": "-multiInst allows multiple windows; settings isolate via redirected APPDATA when not installed in portable mode."
+  }
+]

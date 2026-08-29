@@ -1,0 +1,24 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AssemblyName>AppMux.Manager</AssemblyName>
+    <RootNamespace>AppMux.Manager</RootNamespace>
+    <Version>0.1.0</Version>
+    <ApplicationIcon>Assets\AppMux.ico</ApplicationIcon>
+    <Product>AppMux</Product>
+    <Description>Layered app instances, simplified.</Description>
+    <Company>AppMux</Company>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="WPF-UI" Version="3.0.5" />
+    <Resource Include="Assets\AppMux.png" />
+    <Resource Include="Assets\AppMux.ico" />
+  </ItemGroup>
+
+</Project>

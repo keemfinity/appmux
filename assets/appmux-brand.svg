@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="360" viewBox="0 0 1200 360" role="img" aria-labelledby="title desc">
+  <title id="title">AppMux</title><desc id="desc">Layered app instances, simplified.</desc>
+  <rect width="1200" height="360" fill="#fff" />
+  <image href="appmux-icon.png" x="60" y="30" width="300" height="300" />
+  <text x="385" y="202" font-family="Segoe UI Variable Display,Segoe UI,Arial,sans-serif" font-size="112" font-weight="650" fill="#07163f">App</text>
+  <text x="592" y="202" font-family="Segoe UI Variable Display,Segoe UI,Arial,sans-serif" font-size="112" font-weight="650" fill="#1557f2">Mux</text>
+  <text x="392" y="257" font-family="Segoe UI Variable Text,Segoe UI,Arial,sans-serif" font-size="25" fill="#68728b">Layered app instances, simplified.</text>
+</svg>
