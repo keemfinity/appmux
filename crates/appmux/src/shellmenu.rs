@@ -119,7 +119,7 @@ pub fn sync_protocols(db: &Db) -> Result<usize> {
         associations.set_value(protocol, &prog_id)?;
         let class_path = format!(r"Software\Classes\{prog_id}");
         let (class, _) = hkcu.create_subkey(&class_path)?;
-        class.set_value("", &format!("URL:{protocol} — AppMux"))?;
+        class.set_value("", &format!("URL:{protocol} (AppMux)"))?;
         class.set_value("URL Protocol", &"")?;
         let (icon, _) = class.create_subkey("DefaultIcon")?;
         icon.set_value("", &format!("\"{}\",0", manager.to_string_lossy()))?;

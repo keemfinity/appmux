@@ -187,7 +187,7 @@
             Margin="24,12,24,14"
             FontSize="11"
             Foreground="{DynamicResource SubtleTextBrush}"
-            Text="Running multiple copies of a program may breach its terms of service — checking that is your responsibility. Apps with anti-cheat, DRM, or kernel components are declined."
+            Text="Running multiple copies of a program may breach its terms of service. Checking that is your responsibility. Apps with anti-cheat, DRM, or kernel components are declined."
             TextWrapping="Wrap" />
     </Grid>
 </ui:FluentWindow>

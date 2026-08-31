@@ -210,7 +210,7 @@ public partial class NewInstanceWindow
             Content = "AppMux will make a locally signed copy with a new Windows identity. " +
                       "Continue only if this app is free and has no DRM, paid-license, anti-cheat, " +
                       "or driver restriction. The Store-installed original is not modified.",
-            PrimaryButtonText = "I confirm — continue",
+            PrimaryButtonText = "I confirm and continue",
             CloseButtonText = "Cancel",
         };
         if (await consent.ShowDialogAsync() != Wpf.Ui.Controls.MessageBoxResult.Primary)

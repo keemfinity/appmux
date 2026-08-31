@@ -73,7 +73,7 @@ public partial class AppPickerWindow
     /// <param name="windowedOnly">
     /// true: only processes with a visible main window ("Running now").
     /// false: every process we can resolve a path for, minus Windows system
-    /// binaries ("All processes" — includes tray and background apps).
+    /// binaries. "All processes" includes tray and background apps.
     /// </param>
     private static List<AppEntry> ScanProcesses(bool windowedOnly)
     {
@@ -101,7 +101,7 @@ public partial class AppPickerWindow
                 {
                     Name = name,
                     Path = path,
-                    Location = isStore ? "Microsoft Store app — experimental Package Lab" : path,
+                    Location = isStore ? "Microsoft Store app (experimental Package Lab)" : path,
                     Icon = Core.IconForPath(path),
                     Unsupported = isStore,
                 };
@@ -237,7 +237,7 @@ public partial class AppPickerWindow
                 {
                     Name = r.Name,
                     Path = r.Path,
-                    Location = "Microsoft Store app — experimental Package Lab",
+                    Location = "Microsoft Store app (experimental Package Lab)",
                     Icon = Core.IconForPath(r.Path),
                     Unsupported = true,
                 })

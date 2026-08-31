@@ -3,7 +3,7 @@
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
     xmlns:ui="http://schemas.lepo.co/wpfui/2022/xaml"
-    Title="New instance — AppMux"
+    Title="New instance: AppMux"
     Icon="Assets/AppMux.ico"
     Width="440"
     SizeToContent="Height"
@@ -47,7 +47,7 @@
                     Margin="0,0,0,6"
                     FontSize="12"
                     Foreground="{DynamicResource SubtleTextBrush}"
-                    Text="Instance name — e.g. Work, Personal, Client A" />
+                    Text="Instance name, for example: Work, Personal, Client A" />
                 <ui:TextBox
                     x:Name="NameBox"
                     FontSize="14"

@@ -3,6 +3,9 @@
 #define MyAppPublisher "keemfinity"
 #define MyAppURL "https://github.com/keemfinity/appmux"
 #define MyAppExeName "AppMux.Manager.exe"
+#ifndef PublishDir
+#define PublishDir "..\manager\publish"
+#endif
 
 [Setup]
 AppId={{9B720D85-394B-44E4-B9D7-5979EA40E530}
@@ -37,7 +40,7 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 Name: "desktopicon"; Description: "Create a desktop shortcut"; GroupDescription: "Additional shortcuts:"; Flags: unchecked
 
 [Files]
-Source: "..\manager\publish\*"; DestDir: "{app}"; Excludes: "*.pdb"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "{#PublishDir}\*"; DestDir: "{app}"; Excludes: "*.pdb"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
 Name: "{group}\AppMux"; Filename: "{app}\{#MyAppExeName}"

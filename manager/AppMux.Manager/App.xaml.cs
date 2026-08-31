@@ -15,7 +15,7 @@ public partial class App : Application
             args.Handled = true;
             MessageBox.Show(
                 args.Exception.ToString(),
-                "AppMux — unexpected error",
+                "AppMux: unexpected error",
                 MessageBoxButton.OK,
                 MessageBoxImage.Error);
         };
