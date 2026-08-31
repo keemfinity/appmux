@@ -1,12 +1,12 @@
 # AppMux
 
 <p align="center">
-  <img src="assets/appmux-brand.png" alt="AppMux — Layered app instances, simplified." width="900" />
+  <img src="assets/appmux-brand.png" alt="AppMux: Layered app instances, simplified." width="900" />
 </p>
 
 <p align="center"><strong>Layered app instances, simplified.</strong></p>
 
-Run multiple isolated instances of Windows apps — separate logins, separate
+Run multiple isolated instances of Windows apps: separate logins, separate
 settings, side by side. Right-click a shortcut or exe, pick an instance
 ("Work", "Personal", "Client A"), and it launches with its own private data.
 
@@ -23,22 +23,22 @@ with anti-cheat, DRM, licensing controls, or kernel components remain unsupporte
 
 Isolation is tiered per app, driven by a recipe database:
 
-- **Tier A — native flags.** Many apps support multi-instance/profile flags
+- **Tier A: native flags.** Many apps support multi-instance/profile flags
   (Chrome/Edge `--user-data-dir`, VS Code `--user-data-dir --extensions-dir`,
   Telegram `-many -workdir`, Firefox `-profile -no-remote`, Discord
   `--multi-instance` + `DISCORD_USER_DATA_DIR`). Complete isolation, zero
   privilege.
-- **Tier B — environment redirection.** `APPDATA`, `LOCALAPPDATA`, `TEMP`,
+- **Tier B: environment redirection.** `APPDATA`, `LOCALAPPDATA`, `TEMP`,
   `USERPROFILE` are pointed into a per-instance directory. Works for apps that
   resolve paths through the environment. **Known limitation:** apps that use
-  the Windows shell API (`SHGetKnownFolderPath`) ignore environment variables —
-  most Electron apps do this, which is why Electron apps need Tier A recipes.
+  the Windows shell API (`SHGetKnownFolderPath`) ignore environment variables.
+  Many Electron apps do this and need a curated recipe or stronger isolation tier.
   Unverified apps get a warning.
-- **Tier C — hidden local user account per instance** *(experimental)*: real
+- **Tier C: hidden local user account per instance** *(experimental)*: real
   separate HKCU registry and user profile for classic Win32 apps. Per-user-only
   installations are mirrored into the hidden account's matching profile path so
   the app sees the directory structure it expects without accessing the owner's profile.
-- **Tier D — curated Compatibility Shim**: for exceptional apps that still enforce
+- **Tier D: curated Compatibility Shim.** For exceptional apps that still enforce
   cross-profile singleton or callback behavior. Each adapter is built in, requires
   explicit consent, and is gated to exact executable/resource hashes and patch
   signatures. Unknown versions fail closed instead of receiving a best-effort patch.
@@ -93,26 +93,24 @@ service-free mode is approved. This broadens support to similar apps but cannot
 guarantee compatibility when a service is essential or a vendor adds its own
 global singleton/licensing checks.
 
-## OAuth and deep-link callbacks
+## Sign-in and deep-link callbacks
 
-Package Lab rewrites copied protocol declarations so callbacks keep the named
-instance's private profile and labels handlers as `App (Instance)`. AppMux also
-registers an optional protocol router:
+AppMux keeps authentication callbacks scoped to the instance that initiated
+sign-in. It never displays, logs, or persists sensitive callback URLs.
+
+Package Lab preserves supported protocol declarations in copied packages and
+labels each handler as `App (Instance)`. When a package manifest cannot legally
+carry profile parameters, the optional AppMux protocol router presents the
+matching named instances and activates the selected package identity directly:
 
 ```
 appmux protocol sync
 ```
 
-When selected as the handler, the glass picker lists matching named instances
-and routes the callback directly through the chosen package AUMID. Sensitive
-OAuth callback URLs are never displayed, logged, or persisted. Profile-aware
-direct callback handling is verified with simultaneous original Claude +
-`ClaudeOAuth`: selecting `Claude (ClaudeOAuth)` returned Google login to that
-private profile. The AppMux picker startup/selection UI is smoke-tested. Older base
-`uap:Protocol` manifests cannot legally carry profile parameters; AppMux removes
-that handler only from the clone and routes its callbacks through the named
-router instead. Generated Electron/Chromium profile arguments are persisted on
-the instance and used for both normal launches and callbacks.
+Tier D adapters do not register callbacks in the owner's Windows profile. They
+use an adapter-specific, private in-memory transport to return authentication to
+the already-running isolated instance. This keeps the original application's
+protocol handler independent from AppMux.
 
 ## Usage
 
@@ -131,11 +129,11 @@ appmux menu remove                                          # uninstall it
 ### Developer mode
 
 `appmux dev on` enables `run --force`, which bypasses the anti-cheat/DRM
-guardrail *heuristics* — strictly for testing false positives while writing
+guardrail *heuristics*: strictly for testing false positives while writing
 recipes. Packaged apps cannot use ordinary `run --force`; eligible free apps
 require Package Lab to build and sign a separate Windows package identity.
 
-### Tier C — strong isolation (experimental)
+### Tier C: strong isolation (experimental)
 
 Existing instances can be upgraded from recipe isolation to a genuine separate
 HKCU hive and Windows profile:
@@ -194,7 +192,7 @@ clone before removing the record; the user separately chooses whether to retain
 or wipe the external login/profile data, so installed packages cannot be
 silently orphaned.
 Package Lab is not universal: apps can retain a Win32 singleton across package
-identities. Spotify is a verified example—it works as a persistent alternate
+identities. Spotify is a verified example. It works as a persistent alternate
 identity when vendor Spotify is closed, but does not run side by side. For
 simultaneous Spotify accounts, use isolated browser/web-player instances.
 Codex/ChatGPT is also declined by Package Lab because its package declares
@@ -215,8 +213,8 @@ Two binaries are built: `appmux.exe` (console CLI) and `appmuxw.exe`
 ## Explorer integration
 
 `appmux menu sync` writes a cascading "AppMux" menu for `.lnk` and `.exe`
-files under `HKCU\Software\Classes` — plain registry verbs, so **no code ever
-loads into Explorer** and a AppMux bug can never crash the shell. On
+files under `HKCU\Software\Classes`: plain registry verbs, so **no code ever
+loads into Explorer** and an AppMux bug can never crash the shell. On
 Windows 11 the menu appears under "Show more options"; native top-level menu
 support (sparse MSIX + IExplorerCommand) is planned.
 
