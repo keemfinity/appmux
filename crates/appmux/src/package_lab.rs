@@ -7,9 +7,18 @@ use crate::{paths, store::Instance};
 use anyhow::{bail, Context, Result};
 use roxmltree::Document;
 use serde::Serialize;
+use sha2::{Digest, Sha256};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 const TRANSFORM_VERSION: u64 = 2;
+const SDK_BUILD_TOOLS_VERSION: &str = "10.0.22621.3233";
+const SDK_BIN_VERSION: &str = "10.0.22621.0";
+const SDK_BUILD_TOOLS_URL: &str = "https://api.nuget.org/v3-flatcontainer/microsoft.windows.sdk.buildtools/10.0.22621.3233/microsoft.windows.sdk.buildtools.10.0.22621.3233.nupkg";
+const SDK_BUILD_TOOLS_SHA256: &str =
+    "333109862e342aa04c217c91ebb2d550d8a5decdcb0a7e8b83f115623c830e0b";
+const MAKEAPPX_SHA256: &str = "1053b2f7f5047385b389d16d5e0d2892d8fd6d9b7f273e641d89c75b273d3633";
+const SIGNTOOL_SHA256: &str = "8cfd7441d53c3418ec4ca4436644020f7a1a4a9ccb7d102aed53a61e2a89e405";
 const UAP3_NAMESPACE: &str = "http://schemas.microsoft.com/appx/manifest/uap/windows10/3";
 
 #[derive(Serialize)]
@@ -725,7 +734,21 @@ pub fn prepare_workspace(target: &Path, instance: &str, strip_services: bool) ->
     Ok(source)
 }
 
-fn sdk_tool(name: &str) -> Option<PathBuf> {
+fn sha256_file(path: &Path) -> Result<String> {
+    let mut file = std::fs::File::open(path)?;
+    let mut digest = Sha256::new();
+    let mut buffer = vec![0u8; 1024 * 1024];
+    loop {
+        let read = file.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        digest.update(&buffer[..read]);
+    }
+    Ok(format!("{:x}", digest.finalize()))
+}
+
+fn installed_sdk_tool(name: &str) -> Option<PathBuf> {
     let root = PathBuf::from(std::env::var_os("ProgramFiles(x86)")?)
         .join("Windows Kits")
         .join("10")
@@ -740,7 +763,168 @@ fn sdk_tool(name: &str) -> Option<PathBuf> {
     versions
         .into_iter()
         .map(|v| v.join("x64").join(name))
-        .find(|p| p.exists())
+        .find(|p| p.is_file())
+}
+
+fn sdk_cache_root() -> PathBuf {
+    paths::root()
+        .join("Tools")
+        .join(format!("WindowsSDK-BuildTools-{SDK_BUILD_TOOLS_VERSION}"))
+}
+
+fn sdk_expected_hash(name: &str) -> Result<&'static str> {
+    match name.to_ascii_lowercase().as_str() {
+        "makeappx.exe" => Ok(MAKEAPPX_SHA256),
+        "signtool.exe" => Ok(SIGNTOOL_SHA256),
+        _ => bail!("unsupported Windows SDK tool '{name}'"),
+    }
+}
+
+fn cached_sdk_tool(name: &str) -> Result<Option<PathBuf>> {
+    let tool = sdk_cache_root()
+        .join("bin")
+        .join(SDK_BIN_VERSION)
+        .join("x64")
+        .join(name);
+    if !tool.exists() {
+        return Ok(None);
+    }
+    anyhow::ensure!(
+        tool.is_file() && sha256_file(&tool)?.eq_ignore_ascii_case(sdk_expected_hash(name)?),
+        "managed Windows SDK tool failed integrity verification: {}",
+        tool.display()
+    );
+    Ok(Some(tool))
+}
+
+fn sdk_tool(name: &str) -> Result<PathBuf> {
+    if let Some(tool) = installed_sdk_tool(name) {
+        return Ok(tool);
+    }
+    cached_sdk_tool(name)?.with_context(|| {
+        format!(
+            "Windows SDK {name} is unavailable; accept the Microsoft SDK license in Package Lab to download the verified build tools"
+        )
+    })
+}
+
+pub fn sdk_tools_available() -> Result<bool> {
+    Ok(
+        (installed_sdk_tool("makeappx.exe").is_some()
+            || cached_sdk_tool("makeappx.exe")?.is_some())
+            && (installed_sdk_tool("signtool.exe").is_some()
+                || cached_sdk_tool("signtool.exe")?.is_some()),
+    )
+}
+
+pub fn ensure_sdk_tools(accept_windows_sdk_license: bool) -> Result<()> {
+    if sdk_tools_available()? {
+        return Ok(());
+    }
+    anyhow::ensure!(
+        accept_windows_sdk_license,
+        "Microsoft Windows SDK license acceptance is required before downloading SDK Build Tools"
+    );
+    let cache = sdk_cache_root();
+    anyhow::ensure!(
+        !cache.exists(),
+        "managed Windows SDK cache exists but is incomplete; remove it before retrying: {}",
+        cache.display()
+    );
+    let parent = cache
+        .parent()
+        .context("Windows SDK cache has no parent directory")?;
+    std::fs::create_dir_all(parent)?;
+    let staging = parent.join(format!(
+        ".WindowsSDK-BuildTools-{SDK_BUILD_TOOLS_VERSION}-{}",
+        std::process::id()
+    ));
+    anyhow::ensure!(
+        !staging.exists(),
+        "Windows SDK staging directory already exists"
+    );
+    std::fs::create_dir_all(&staging)?;
+    let result = (|| -> Result<()> {
+        let package = staging.join("sdk.nupkg");
+        let system_root = std::env::var_os("SystemRoot").unwrap_or_else(|| r"C:\Windows".into());
+        let curl = PathBuf::from(system_root).join("System32").join("curl.exe");
+        anyhow::ensure!(curl.is_file(), "Windows curl.exe is unavailable");
+        let output = std::process::Command::new(curl)
+            .args(["--fail", "--location", "--retry", "3", "--retry-delay", "2"])
+            .arg("--output")
+            .arg(&package)
+            .arg(SDK_BUILD_TOOLS_URL)
+            .output()?;
+        anyhow::ensure!(
+            output.status.success(),
+            "Windows SDK Build Tools download failed:\n{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let package_hash = sha256_file(&package)?;
+        anyhow::ensure!(
+            package_hash.eq_ignore_ascii_case(SDK_BUILD_TOOLS_SHA256),
+            "Windows SDK Build Tools package hash mismatch: expected {SDK_BUILD_TOOLS_SHA256}, got {package_hash}"
+        );
+        let extracted = staging.join("package");
+        let expand = staging.join("expand.ps1");
+        std::fs::write(
+            &expand,
+            "param([string]$Package,[string]$Destination)\n$ErrorActionPreference='Stop'\n$zip=[IO.Path]::ChangeExtension($Package,'.zip')\nCopy-Item -LiteralPath $Package -Destination $zip -Force\nExpand-Archive -LiteralPath $zip -DestinationPath $Destination -Force\n",
+        )?;
+        let output = std::process::Command::new("powershell.exe")
+            .args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+            ])
+            .arg(&expand)
+            .arg("-Package")
+            .arg(&package)
+            .arg("-Destination")
+            .arg(&extracted)
+            .output()?;
+        anyhow::ensure!(
+            output.status.success(),
+            "Windows SDK Build Tools extraction failed:\n{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        for (name, expected) in [
+            ("makeappx.exe", MAKEAPPX_SHA256),
+            ("signtool.exe", SIGNTOOL_SHA256),
+        ] {
+            let tool = extracted
+                .join("bin")
+                .join(SDK_BIN_VERSION)
+                .join("x64")
+                .join(name);
+            anyhow::ensure!(
+                tool.is_file() && sha256_file(&tool)?.eq_ignore_ascii_case(expected),
+                "downloaded Windows SDK {name} failed integrity verification"
+            );
+        }
+        std::fs::write(
+            extracted.join("appmux-sdk-tools.json"),
+            serde_json::to_string_pretty(&serde_json::json!({
+                "package": "Microsoft.Windows.SDK.BuildTools",
+                "version": SDK_BUILD_TOOLS_VERSION,
+                "sha256": SDK_BUILD_TOOLS_SHA256,
+                "license_accepted": true
+            }))?,
+        )?;
+        std::fs::rename(&extracted, &cache)?;
+        Ok(())
+    })();
+    let _ = std::fs::remove_dir_all(&staging);
+    result?;
+    anyhow::ensure!(
+        sdk_tools_available()?,
+        "Windows SDK tools remain unavailable after setup"
+    );
+    Ok(())
 }
 
 fn package_file(report: &Report, instance: &str) -> PathBuf {
@@ -758,7 +942,7 @@ pub fn pack_workspace(target: &Path, instance: &str) -> Result<PathBuf> {
     if !source.join("AppxManifest.xml").exists() {
         bail!("workspace is not prepared: {}", source.display());
     }
-    let makeappx = sdk_tool("makeappx.exe").context("Windows SDK makeappx.exe not found")?;
+    let makeappx = sdk_tool("makeappx.exe")?;
     let output = package_file(&report, instance);
     let marker = dir.join("packed.json");
     let marker_current = std::fs::read_to_string(&marker)
@@ -804,7 +988,7 @@ pub fn sign_workspace(target: &Path, instance: &str) -> Result<PathBuf> {
     if !package.exists() {
         bail!("packed MSIX not found: {}", package.display());
     }
-    let sign_tool = sdk_tool("signtool.exe").context("Windows SDK signtool.exe not found")?;
+    let sign_tool = sdk_tool("signtool.exe")?;
     let dir = lab_dir(&report, instance);
     let script = dir.join("sign-local-test-package.ps1");
     std::fs::write(
@@ -1171,6 +1355,19 @@ mod tests {
         assert!(!output.contains("windows.protocol"));
         assert!(!output.contains("Parameters="));
         assert!(output.contains("Generic App (Personal)"));
+    }
+
+    #[test]
+    fn sdk_build_tools_are_exactly_pinned_and_allowlisted() {
+        assert_eq!(SDK_BUILD_TOOLS_VERSION, "10.0.22621.3233");
+        assert!(SDK_BUILD_TOOLS_URL.starts_with("https://api.nuget.org/"));
+        for hash in [SDK_BUILD_TOOLS_SHA256, MAKEAPPX_SHA256, SIGNTOOL_SHA256] {
+            assert_eq!(hash.len(), 64);
+            assert!(hash.chars().all(|character| character.is_ascii_hexdigit()));
+        }
+        assert_eq!(sdk_expected_hash("makeappx.exe").unwrap(), MAKEAPPX_SHA256);
+        assert_eq!(sdk_expected_hash("SIGNTOOL.EXE").unwrap(), SIGNTOOL_SHA256);
+        assert!(sdk_expected_hash("powershell.exe").is_err());
     }
 
     #[test]

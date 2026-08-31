@@ -169,6 +169,12 @@ only the copied manifest identity, packs and locally signs an MSIX, then
 sideloads it after explicit consent. It never modifies the Store-installed app
 or takes ownership/changes ACLs under `WindowsApps`.
 
+If MakeAppx or SignTool is not installed, Package Lab requests explicit Microsoft
+Windows SDK license acceptance, downloads the official 10.0.22621.3233 Build
+Tools package from NuGet, verifies pinned package and executable SHA-256 hashes,
+and stores it under `%LOCALAPPDATA%\AppMux\Tools`. Modified or unknown tools are
+refused.
+
 ```
 appmux package-lab inspect --target <path-inside-package>
 appmux dev on

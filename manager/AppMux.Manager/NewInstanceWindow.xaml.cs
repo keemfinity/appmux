@@ -280,7 +280,39 @@ public partial class NewInstanceWindow
                 return;
             }
         }
-        BeginProgress("Copying the package...", 12);
+        var sdkTools = await Core.RunAppmuxAsync("package-lab", "sdk-tools");
+        if (sdkTools.Code != 0)
+        {
+            var sdkConsent = new Wpf.Ui.Controls.MessageBox
+            {
+                Title = "Microsoft SDK Build Tools required",
+                Content = "Package Lab needs MakeAppx and SignTool. AppMux will download the official " +
+                          "Microsoft.Windows.SDK.BuildTools 10.0.22621.3233 package from NuGet (about 21.1 MB), " +
+                          "verify pinned SHA-256 hashes, and store it under your AppMux tools folder.\n\n" +
+                          "Continue only if you accept the Microsoft Windows SDK license at " +
+                          "https://aka.ms/WinSDKLicenseURL.",
+                PrimaryButtonText = "Accept license and download",
+                CloseButtonText = "Cancel",
+            };
+            if (await sdkConsent.ShowDialogAsync() != Wpf.Ui.Controls.MessageBoxResult.Primary)
+            {
+                CreateButton.IsEnabled = true;
+                return;
+            }
+            BeginProgress("Downloading verified Microsoft SDK tools...", 5, true);
+            sdkTools = await Core.RunAppmuxAsync(
+                "package-lab", "sdk-tools", "--accept-windows-sdk-license");
+            if (sdkTools.Code != 0)
+            {
+                FailProgress(sdkTools.Output);
+                return;
+            }
+            SetProgress("Copying the package...", 12);
+        }
+        else
+        {
+            BeginProgress("Copying the package...", 12);
+        }
         await Core.RunAppmuxAsync("dev", "on");
         var prepareArgs = new List<string>
         {
@@ -351,7 +383,7 @@ public partial class NewInstanceWindow
         await CompleteProgress();
     }
 
-    private void BeginProgress(string message, double value)
+    private void BeginProgress(string message, double value, bool indeterminate = false)
     {
         _busy = true;
         NameBox.IsEnabled = false;
@@ -360,7 +392,7 @@ public partial class NewInstanceWindow
         CancelButton.IsEnabled = false;
         ErrorText.Visibility = Visibility.Collapsed;
         ProgressPanel.Visibility = Visibility.Visible;
-        SetProgress(message, value);
+        SetProgress(message, value, indeterminate);
     }
 
     private void SetProgress(string message, double value, bool indeterminate = false)

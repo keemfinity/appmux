@@ -153,6 +153,10 @@ enum PackageLabCmd {
         #[arg(long)]
         target: String,
     },
+    SdkTools {
+        #[arg(long)]
+        accept_windows_sdk_license: bool,
+    },
     /// Write a dry-run inspection plan (requires developer mode)
     Plan {
         #[arg(long)]
@@ -1067,6 +1071,13 @@ fn package_lab_command(cmd: PackageLabCmd) -> Result<()> {
         PackageLabCmd::Inspect { target } => {
             let report = package_lab::inspect(std::path::Path::new(&target))?;
             package_lab::print_report(&report)
+        }
+        PackageLabCmd::SdkTools {
+            accept_windows_sdk_license,
+        } => {
+            package_lab::ensure_sdk_tools(accept_windows_sdk_license)?;
+            console::info("Windows SDK packaging tools are ready.");
+            Ok(())
         }
         PackageLabCmd::Plan { target, instance } => {
             require_package_lab_dev(&instance)?;
