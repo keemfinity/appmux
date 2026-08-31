@@ -30,6 +30,8 @@ pub struct Instance {
     pub profile_args: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub web_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_pid: Option<u32>,
 }
 
 fn default_isolation() -> String {
@@ -158,6 +160,7 @@ mod tests {
             protocols: Vec::new(),
             profile_args: Vec::new(),
             web_url: None,
+            last_pid: None,
         }
     }
 

@@ -28,6 +28,7 @@ public sealed class InstanceModel
     [JsonPropertyName("protocols")] public List<string> Protocols { get; set; } = new();
     [JsonPropertyName("profile_args")] public List<string> ProfileArgs { get; set; } = new();
     [JsonPropertyName("web_url")] public string? WebUrl { get; set; }
+    [JsonPropertyName("last_pid")] public uint? LastPid { get; set; }
     [JsonIgnore] public string FriendlyName => Core.FriendlyAppName(this);
     [JsonIgnore] public ImageSource IconSource => Core.IconForInstance(this);
 }
@@ -279,6 +280,56 @@ public static class Core
 
     private const uint SHGFI_ICON = 0x100;
     private const uint SHGFI_LARGEICON = 0x0;
+
+    public static bool IsInstanceRunning(InstanceModel instance)
+    {
+        if (instance.Isolation == "account" && !string.IsNullOrWhiteSpace(instance.WindowsUser))
+        {
+            try
+            {
+                using var active = EventWaitHandle.OpenExisting($"Local\\AppMux.StopEvent.v1.{instance.WindowsUser}");
+                return active is not null;
+            }
+            catch (WaitHandleCannotBeOpenedException) { return false; }
+            catch (UnauthorizedAccessException) { return false; }
+        }
+        if (instance.LastPid is uint pid)
+        {
+            try
+            {
+                using var process = Process.GetProcessById((int)pid);
+                if (!process.HasExited) return true;
+            }
+            catch (ArgumentException) { }
+            catch (InvalidOperationException) { }
+        }
+        if (instance.Isolation == "package" && !string.IsNullOrWhiteSpace(instance.PackageAumid))
+        {
+            var family = instance.PackageAumid.Split('!')[0];
+            var first = family.IndexOf('_');
+            var last = family.LastIndexOf('_');
+            if (first > 0 && last > first)
+            {
+                var identity = family[..first];
+                var publisher = family[(last + 1)..];
+                foreach (var process in Process.GetProcesses())
+                {
+                    try
+                    {
+                        var path = process.MainModule?.FileName;
+                        if (path is null) continue;
+                        var folder = path.Split(Path.DirectorySeparatorChar)
+                            .FirstOrDefault(part => part.StartsWith(identity + "_", StringComparison.OrdinalIgnoreCase)
+                                && part.EndsWith("_" + publisher, StringComparison.OrdinalIgnoreCase));
+                        if (folder is not null) return true;
+                    }
+                    catch { }
+                    finally { process.Dispose(); }
+                }
+            }
+        }
+        return false;
+    }
 
     public static string InstanceDataDir(InstanceModel i) =>
         Path.Combine(DataRoot, "Instances", Sanitize(i.AppId), Sanitize(i.Name));

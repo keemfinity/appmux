@@ -711,8 +711,9 @@ fn run(
             if stored.isolation == "web" {
                 stored.last_used = store::now();
                 let selected = stored.clone();
+                let pid = web_app::launch(&selected)?;
+                stored.last_pid = Some(pid);
                 db.save()?;
-                web_app::launch(&selected)?;
                 return Ok(());
             }
         }
@@ -802,6 +803,7 @@ fn run(
                 protocols: Vec::new(),
                 profile_args: Vec::new(),
                 web_url: None,
+                last_pid: None,
             };
             db.instances.push(inst.clone());
             inst
@@ -844,6 +846,12 @@ fn run(
     } else {
         launch::launch(&plan, &inst.data_dir())?
     };
+    if pid != 0 {
+        if let Some(stored) = db.find(app_id, &name) {
+            stored.last_pid = Some(pid);
+        }
+        db.save()?;
+    }
     if console::has_console() {
         console::info(&format!(
             "{} '{}' instance '{}' started (pid {pid}, tier: {}, status: {}).",
@@ -893,6 +901,10 @@ fn stop(app: &str, instance: &str) -> Result<()> {
             "Stop is currently supported for isolated Package, Web, and Windows-profile instances"
         ),
     }
+    if let Some(saved) = db.find(app, instance) {
+        saved.last_pid = None;
+    }
+    db.save()?;
     console::info(&format!("Stopped all processes for {app} / {instance}."));
     Ok(())
 }
@@ -969,6 +981,7 @@ fn web_command(cmd: WebCmd) -> Result<()> {
                 protocols: Vec::new(),
                 profile_args: Vec::new(),
                 web_url: Some(url),
+                last_pid: None,
             };
             let stored = if let Some(existing) = db.find(&app_id, &instance) {
                 *existing = value;
@@ -979,7 +992,11 @@ fn web_command(cmd: WebCmd) -> Result<()> {
             };
             db.save()?;
             let _ = shellmenu::sync(&db);
-            web_app::launch(&stored)?;
+            let pid = web_app::launch(&stored)?;
+            if let Some(saved) = db.find(&app_id, &instance) {
+                saved.last_pid = Some(pid);
+            }
+            db.save()?;
             console::info(&format!("Created App Web instance {app_id} / {instance}."));
             Ok(())
         }
@@ -1200,6 +1217,7 @@ fn package_lab_command(cmd: PackageLabCmd) -> Result<()> {
                 protocols: report.protocols.clone(),
                 profile_args: package_lab::profile_arguments(&report, target_path),
                 web_url: None,
+                last_pid: None,
             };
             if let Some(existing) = db.find(&app_id, &instance) {
                 *existing = value;

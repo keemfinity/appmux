@@ -50,7 +50,9 @@ your instances as consumer-friendly app cards with the real application logo,
 friendly product name, named identity, storage, and last-used time; it launches or removes them,
 creates named instances via a dialog, and installs the Explorer menu. The
 settings gear centralizes System/Dark/Light appearance, shell/protocol repair,
-developer mode, data-folder access, and product information. Theme selection is
+developer mode, data-folder access, and product information. Cards refresh their
+Running or Stopped state every three seconds, and Stop appears only when AppMux
+can verify an active instance with a safe stop mechanism. Theme selection is
 persisted in `%LOCALAPPDATA%\AppMux\manager.json` and applies to every window.
 When the manager sits next to `appmuxw.exe`, the right-click "New instance..." verb
 opens its naming dialog; without it, instances are auto-named.

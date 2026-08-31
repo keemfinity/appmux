@@ -1,11 +1,15 @@
+using System.ComponentModel;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Media;
+using System.Windows.Threading;
 
 namespace AppMux.Manager;
 
-public sealed class InstanceRow
+public sealed class InstanceRow : INotifyPropertyChanged
 {
+    private bool _isRunning;
+
     public required InstanceModel Model { get; init; }
     public string InstanceName => Model.Name;
     public string AppDisplay => Core.FriendlyAppName(Model);
@@ -15,14 +19,36 @@ public sealed class InstanceRow
     public bool IsAccount => Model.Isolation == "account";
     public bool IsTierD => !string.IsNullOrWhiteSpace(Model.TierDAdapter);
     public bool IsStoppable => Model.Isolation is "package" or "web" or "account";
+    public bool IsRunning => _isRunning;
+    public bool CanStop => IsStoppable && IsRunning;
+    public string RuntimeLabel => IsRunning ? "Running" : "Stopped";
+    public Brush RuntimeBrush => IsRunning ? Brushes.LimeGreen : Brushes.Gray;
     public required string Meta { get; init; }
+
+    public event PropertyChangedEventHandler? PropertyChanged;
+
+    public void SetRunning(bool running)
+    {
+        if (_isRunning == running) return;
+        _isRunning = running;
+        PropertyChanged?.Invoke(this, new(nameof(IsRunning)));
+        PropertyChanged?.Invoke(this, new(nameof(CanStop)));
+        PropertyChanged?.Invoke(this, new(nameof(RuntimeLabel)));
+        PropertyChanged?.Invoke(this, new(nameof(RuntimeBrush)));
+    }
 }
 
 public partial class MainWindow
 {
+    private readonly DispatcherTimer _runtimeTimer;
+    private List<InstanceRow> _rows = new();
+    private bool _runtimeRefreshActive;
+
     public MainWindow()
     {
         InitializeComponent();
+        _runtimeTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(3) };
+        _runtimeTimer.Tick += async (_, _) => await RefreshRuntimeState();
         SizeChanged += (_, _) => FitInstanceList();
         Loaded += async (_, _) =>
         {
@@ -30,7 +56,9 @@ public partial class MainWindow
             ThemeService.ConfigureWindow(this);
             await Core.RunAppmuxAsync("protocol", "sync");
             await RefreshAsync();
+            _runtimeTimer.Start();
         };
+        Closed += (_, _) => _runtimeTimer.Stop();
     }
 
     private void FitInstanceList()
@@ -44,10 +72,10 @@ public partial class MainWindow
             .OrderByDescending(i => i.LastUsed)
             .ToList();
 
-        var rows = await Task.Run(() => instances.Select(i =>
+        _rows = await Task.Run(() => instances.Select(i =>
         {
             var size = Core.DirSize(Core.InstanceDataDir(i));
-            return new InstanceRow
+            var row = new InstanceRow
             {
                 Model = i,
                 Icon = Core.IconForInstance(i),
@@ -57,10 +85,28 @@ public partial class MainWindow
                         ? $"Private Windows profile  ·  Used {Core.FormatAgo(i.LastUsed)}"
                         : $"{Core.FormatSize(size)}  ·  {i.Isolation switch { "package" => "Private app profile", "web" => "Private web profile", _ => "Private app profile" }}  ·  Used {Core.FormatAgo(i.LastUsed)}",
             };
+            row.SetRunning(Core.IsInstanceRunning(i));
+            return row;
         }).ToList());
 
-        InstanceList.ItemsSource = rows;
-        EmptyHint.Visibility = rows.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+        InstanceList.ItemsSource = _rows;
+        EmptyHint.Visibility = _rows.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+    }
+
+    private async Task RefreshRuntimeState()
+    {
+        if (_runtimeRefreshActive) return;
+        _runtimeRefreshActive = true;
+        try
+        {
+            var rows = _rows.ToList();
+            var states = await Task.Run(() => rows.Select(row => Core.IsInstanceRunning(row.Model)).ToArray());
+            for (var index = 0; index < rows.Count; index++) rows[index].SetRunning(states[index]);
+        }
+        finally
+        {
+            _runtimeRefreshActive = false;
+        }
     }
 
     private async void OnLaunch(object sender, RoutedEventArgs e)
@@ -77,7 +123,7 @@ public partial class MainWindow
 
     private async void OnStop(object sender, RoutedEventArgs e)
     {
-        if ((sender as Button)?.Tag is not InstanceRow row || !row.IsStoppable) return;
+        if ((sender as Button)?.Tag is not InstanceRow row || !row.CanStop) return;
         var box = new Wpf.Ui.Controls.MessageBox
         {
             Title = $"Stop '{row.Model.Name}'?",
