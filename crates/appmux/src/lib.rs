@@ -537,7 +537,7 @@ fn analyze(target: &str) -> Result<AutoAnalysis> {
             }
             .into(),
             packaged: false,
-            requires_elevation: preflight.is_ok(),
+            requires_elevation: preflight.is_ok() && !plan.recipe.tier_d_owner_host,
             requires_package_consent: false,
             strip_services: false,
             web_url: None,
@@ -820,7 +820,7 @@ fn run(
         return Ok(());
     }
 
-    if plan.recipe.prefer_tier_c && inst.isolation != "account" {
+    if plan.recipe.prefer_tier_c && !matches!(inst.isolation.as_str(), "account" | "owner-host") {
         bail!(
             "'{}' requires its verified private Windows-profile route; complete Tier C setup in AppMux Manager",
             plan.display
@@ -833,7 +833,9 @@ fn run(
         ));
     }
 
-    let pid = if inst.isolation == "account" {
+    let pid = if inst.isolation == "owner-host" {
+        account::launch_owner_host(&inst, &plan)?
+    } else if inst.isolation == "account" {
         account::launch(&inst, &plan)?
     } else if inst.isolation == "package" {
         package_lab::ensure_launch_allowed(&plan.exe)?;
@@ -864,6 +866,7 @@ fn run(
             inst.name,
             match inst.isolation.as_str() {
                 "account" => "C (Windows account)",
+                "owner-host" => "D (owner-host adapter)",
                 "package" => "Package Lab",
                 _ if plan.recipe.args.is_empty() => "B (env redirect)",
                 _ => "A (native flags)",
@@ -894,6 +897,7 @@ fn stop(app: &str, instance: &str) -> Result<()> {
         .ok_or_else(|| anyhow::anyhow!("no instance '{instance}' for app '{app}'"))?
         .clone();
     match stored.isolation.as_str() {
+        "owner-host" => account::stop_owner_host(&stored)?,
         "package" => package_lab::stop_instance(&stored)?,
         "web" => web_app::stop(&stored)?,
         "account" => account::stop(&stored, &launch::plan(&stored.app_path)?)?,
@@ -930,6 +934,9 @@ fn remove(app: &str, instance: &str, purge: bool) -> Result<()> {
         }
         if stored.isolation == "web" {
             web_app::stop(stored)?;
+        }
+        if stored.isolation == "owner-host" && stored.last_pid.is_some() {
+            account::stop_owner_host(stored)?;
         }
     }
     let data_dir = removed.as_ref().map(Instance::data_dir);
@@ -1339,6 +1346,19 @@ fn tier_c(cmd: TierCCmd) -> Result<()> {
                 );
             }
             let plan = launch::plan(&inst.app_path)?;
+            if plan.recipe.tier_d_owner_host {
+                account::prepare_owner_host(&inst, &plan)?;
+                let saved = db.find(&app, &instance).expect("instance disappeared");
+                saved.isolation = "owner-host".to_string();
+                saved.windows_user = None;
+                saved.tier_d_adapter = plan.recipe.tier_d_patch.clone();
+                saved.protocols = owner_routed_protocols(&plan.recipe);
+                db.save()?;
+                console::info(&format!(
+                    "Tier D owner-host adapter ready for {app} / {instance}."
+                ));
+                return Ok(());
+            }
             let username = account::provision(&inst, &plan)?;
             let saved = db.find(&app, &instance).expect("instance disappeared");
             saved.isolation = "account".to_string();

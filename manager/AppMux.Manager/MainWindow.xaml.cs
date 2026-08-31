@@ -18,7 +18,7 @@ public sealed class InstanceRow : INotifyPropertyChanged
     public bool IsPackage => Model.Isolation == "package";
     public bool IsAccount => Model.Isolation == "account";
     public bool IsTierD => !string.IsNullOrWhiteSpace(Model.TierDAdapter);
-    public bool IsStoppable => Model.Isolation is "package" or "web" or "account";
+    public bool IsStoppable => Model.Isolation is "package" or "web" or "account" or "owner-host";
     public bool IsRunning => _isRunning;
     public bool CanStop => IsStoppable && IsRunning;
     public string RuntimeLabel => IsRunning ? "Running" : "Stopped";

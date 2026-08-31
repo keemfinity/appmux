@@ -163,6 +163,15 @@ sign-in callbacks to the already-running instance through a private randomized
 named pipe. Tier D never registers Slack callbacks in the owner's profile, so the
 original Slack installation and its `slack://` handler remain independent.
 
+Figma 126.8.16 uses an owner-host Tier D adapter because its proprietary
+`desktop_rust.node` fast-fails while enumerating fonts under alternate Windows
+credentials. AppMux verifies the Figma executable, archive, native modules,
+FigmaAgent, and official Electron 42.9.2 runtime, then runs a patched managed
+archive under the owner account with a private user-data root. Native
+side-by-side windows, persistent profile data, duplicate prevention, and exact
+PID-tree Stop are verified. Authentication and `figma://` callback completion
+remain pending runtime verification, so this adapter remains partial.
+
 ### Package Lab (experimental packaged-app instances)
 
 Package Lab can clone eligible free MSIX/Appx desktop apps under a unique local

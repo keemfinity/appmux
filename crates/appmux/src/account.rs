@@ -47,9 +47,10 @@ use windows::Win32::System::SystemServices::{
 };
 use windows::Win32::System::Threading::{
     CreateEventW, CreateProcessWithLogonW, GetCurrentProcess, GetExitCodeProcess, OpenEventW,
-    OpenProcess, ResumeThread, SetEvent, TerminateProcess, WaitForSingleObject,
-    CREATE_BREAKAWAY_FROM_JOB, CREATE_NO_WINDOW, CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT,
-    EVENT_MODIFY_STATE, LOGON_WITH_PROFILE, PROCESS_INFORMATION, PROCESS_SYNCHRONIZE, STARTUPINFOW,
+    OpenProcess, QueryFullProcessImageNameW, ResumeThread, SetEvent, TerminateProcess,
+    WaitForSingleObject, CREATE_BREAKAWAY_FROM_JOB, CREATE_NO_WINDOW, CREATE_SUSPENDED,
+    CREATE_UNICODE_ENVIRONMENT, EVENT_MODIFY_STATE, LOGON_WITH_PROFILE, PROCESS_INFORMATION,
+    PROCESS_NAME_FORMAT, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE, STARTUPINFOW,
 };
 use windows::Win32::System::IO::{CreateIoCompletionPort, GetQueuedCompletionStatus};
 use winreg::enums::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_WRITE};
@@ -68,6 +69,26 @@ const SLACK_451191_OPEN_EXTERNAL: &[u8] = b"oe.shell.openExternal";
 const SLACK_451191_APPMUX_OPEN_EXTERNAL: &[u8] = b"global.appmuxOpen    ";
 const SLACK_451191_OPEN_EXTERNAL_SELECTOR: &[u8] = b"const I=n?Vp:y_";
 const SLACK_451191_APPMUX_SELECTOR: &[u8] = b"const I=Vp     ";
+const FIGMA_126816_EXE_SHA256: &str =
+    "da8e4949e1ec02c025e5ca51d4f7c073863a655fe1d131bf5074bc56534b9682";
+const FIGMA_126816_ASAR_SHA256: &str =
+    "d340b3555733fd9b0e35cd75c3f47077cc901c8704f2f59bcbb2cc0b53efd520";
+const FIGMA_126816_PATCHED_ASAR_SHA256: &str =
+    "ba7e8e4624a2de6e707a771fabc25cd1d205146db850f8f4c60b270659c1b763";
+const FIGMA_126816_BINDINGS_SHA256: &str =
+    "c7b6ea2b6aadd778d1df22a150a89c2961825ed84ed117818ef2dcd86c1c8668";
+const FIGMA_126816_DESKTOP_RUST_SHA256: &str =
+    "fc254dbfa7652694fc93a687375501452d84d26020fc77c2a109055f0eb6564a";
+const FIGMA_126816_AGENT_SHA256: &str =
+    "39f63268eb5170e7378886636d441da9af1a2203cd6d88db01df15917de0065f";
+const FIGMA_126816_SINGLETON: &[u8] = b"Ut.app.requestSingleInstanceLock(t)";
+const FIGMA_126816_UPDATE_GATE: &[u8] = b"await n5e()";
+const FIGMA_126816_APPDATA: &[u8] = b"pi.join(zl.app.getPath(\"appData\"),\"Figma\")";
+const FIGMA_ELECTRON_VERSION: &str = "42.9.2";
+const FIGMA_ELECTRON_ARCHIVE_SHA256: &str =
+    "9670d8133cba62f9bfa0e29f86410c42649cb16b2e7b273b1b8fed1fa6bb4db9";
+const FIGMA_ELECTRON_EXE_SHA256: &str =
+    "01cabca68ca51a8a1d88d7a8f879273b9e2b7007ba614c07daa5fb8b0d6546de";
 const MAX_DEFERRED_PROTOCOL_URI_LEN: usize = 8192;
 const DEFERRED_PROTOCOL_WAIT_MS: u32 = 30_000;
 
@@ -1646,6 +1667,12 @@ fn sha256_file(path: &Path) -> Result<String> {
     Ok(format!("{:x}", digest.finalize()))
 }
 
+fn sha256_file_bytes(bytes: &[u8]) -> String {
+    let mut digest = Sha256::new();
+    digest.update(bytes);
+    format!("{:x}", digest.finalize())
+}
+
 fn verify_electron_executable(path: &Path, expected: &str) -> Result<()> {
     anyhow::ensure!(
         expected.len() == 64 && expected.chars().all(|c| c.is_ascii_hexdigit()),
@@ -1867,31 +1894,117 @@ fn patch_slack_open_external_selector(bytes: &mut [u8]) -> Result<bool> {
     }
 }
 
+fn patch_figma_signature(bytes: &mut [u8], original: &[u8], prefix: &[u8]) -> Result<bool> {
+    anyhow::ensure!(
+        prefix.len() <= original.len(),
+        "Figma replacement is too long"
+    );
+    let mut replacement = vec![b' '; original.len()];
+    replacement[..prefix.len()].copy_from_slice(prefix);
+    let originals: Vec<_> = bytes
+        .windows(original.len())
+        .enumerate()
+        .filter_map(|(index, value)| (value == original).then_some(index))
+        .collect();
+    let patched: Vec<_> = bytes
+        .windows(replacement.len())
+        .enumerate()
+        .filter_map(|(index, value)| (value == replacement).then_some(index))
+        .collect();
+    match (originals.as_slice(), patched.as_slice()) {
+        ([index], []) => {
+            bytes[*index..*index + replacement.len()].copy_from_slice(&replacement);
+            Ok(true)
+        }
+        ([], [_]) => Ok(false),
+        _ => bail!("Figma Tier D signature mismatch; refusing to patch copied archive"),
+    }
+}
+
+fn patch_figma_archive(bytes: &mut [u8]) -> Result<bool> {
+    let mut changed = false;
+    changed |= patch_figma_signature(bytes, FIGMA_126816_SINGLETON, b"true")?;
+    changed |= patch_figma_signature(bytes, FIGMA_126816_UPDATE_GATE, b"await 0")?;
+    changed |= patch_figma_signature(bytes, FIGMA_126816_APPDATA, b"zl.app.getPath(\"userData\")")?;
+    Ok(changed)
+}
+
 pub fn preflight_tier_d(plan: &LaunchPlan) -> Result<()> {
     let Some(adapter) = plan.recipe.tier_d_patch.as_deref() else {
         return Ok(());
     };
-    anyhow::ensure!(adapter == "slack-singleton-v1", "unknown Tier D adapter");
-    anyhow::ensure!(
-        sha256_file(&plan.exe)?.eq_ignore_ascii_case(SLACK_451191_EXE_SHA256),
-        "Slack adapter update required: executable hash is not supported"
-    );
-    let source_asar = plan
+    let resources = plan
         .exe
         .parent()
-        .context("Slack executable has no parent")?
-        .join("resources")
-        .join("app.asar");
-    anyhow::ensure!(
-        sha256_file(&source_asar)?.eq_ignore_ascii_case(SLACK_451191_ASAR_SHA256),
-        "Slack adapter update required: app.asar hash is not supported"
-    );
-    let mut executable = std::fs::read(&plan.exe)?;
-    patch_slack_electron_fuse(&mut executable)?;
-    let mut archive = std::fs::read(source_asar)?;
-    patch_slack_singleton(&mut archive)?;
-    patch_slack_open_external(&mut archive)?;
-    patch_slack_open_external_selector(&mut archive)?;
+        .context("Tier D executable has no parent")?
+        .join("resources");
+    let source_asar = resources.join("app.asar");
+    match adapter {
+        "slack-singleton-v1" => {
+            anyhow::ensure!(
+                sha256_file(&plan.exe)?.eq_ignore_ascii_case(SLACK_451191_EXE_SHA256),
+                "Slack adapter update required: executable hash is not supported"
+            );
+            anyhow::ensure!(
+                sha256_file(&source_asar)?.eq_ignore_ascii_case(SLACK_451191_ASAR_SHA256),
+                "Slack adapter update required: app.asar hash is not supported"
+            );
+            let mut executable = std::fs::read(&plan.exe)?;
+            patch_slack_electron_fuse(&mut executable)?;
+            let mut archive = std::fs::read(source_asar)?;
+            patch_slack_singleton(&mut archive)?;
+            patch_slack_open_external(&mut archive)?;
+            patch_slack_open_external_selector(&mut archive)?;
+        }
+        "figma-owner-host-v1" => {
+            anyhow::ensure!(
+                plan.recipe.tier_c_electron_host.as_deref() == Some(FIGMA_ELECTRON_VERSION)
+                    && plan.recipe.tier_c_electron_sha256.as_deref()
+                        == Some(FIGMA_ELECTRON_ARCHIVE_SHA256)
+                    && plan.recipe.tier_c_electron_exe_sha256.as_deref()
+                        == Some(FIGMA_ELECTRON_EXE_SHA256),
+                "Figma Electron host metadata mismatch"
+            );
+            anyhow::ensure!(
+                plan.recipe.tier_d_owner_host,
+                "Figma adapter requires owner-host mode"
+            );
+            anyhow::ensure!(
+                sha256_file(&plan.exe)?.eq_ignore_ascii_case(FIGMA_126816_EXE_SHA256),
+                "Figma adapter update required: executable hash is not supported"
+            );
+            anyhow::ensure!(
+                sha256_file(&source_asar)?.eq_ignore_ascii_case(FIGMA_126816_ASAR_SHA256),
+                "Figma adapter update required: app.asar hash is not supported"
+            );
+            anyhow::ensure!(
+                sha256_file(&resources.join("app.asar.unpacked").join("bindings.node"))?
+                    .eq_ignore_ascii_case(FIGMA_126816_BINDINGS_SHA256),
+                "Figma bindings hash is not supported"
+            );
+            anyhow::ensure!(
+                sha256_file(
+                    &resources
+                        .join("app.asar.unpacked")
+                        .join("desktop_rust.node")
+                )?
+                .eq_ignore_ascii_case(FIGMA_126816_DESKTOP_RUST_SHA256),
+                "Figma desktop runtime hash is not supported"
+            );
+            anyhow::ensure!(
+                sha256_file(&resources.join("FigmaAgent").join("figma_agent.exe"))?
+                    .eq_ignore_ascii_case(FIGMA_126816_AGENT_SHA256),
+                "Figma Agent hash is not supported"
+            );
+            let mut archive = std::fs::read(source_asar)?;
+            patch_figma_archive(&mut archive)?;
+            anyhow::ensure!(
+                sha256_file_bytes(&archive).eq_ignore_ascii_case(FIGMA_126816_PATCHED_ASAR_SHA256),
+                "Figma patched archive hash mismatch"
+            );
+        }
+        _ => bail!("unknown Tier D adapter"),
+    }
     Ok(())
 }
 
@@ -1929,6 +2042,198 @@ fn apply_tier_d_patch(
     patch_slack_open_external(&mut bytes)?;
     patch_slack_open_external_selector(&mut bytes)?;
     std::fs::write(&destination_asar, bytes)?;
+    Ok(())
+}
+
+fn owner_host_root(inst: &Instance) -> PathBuf {
+    inst.data_dir().join("OwnerHost")
+}
+
+pub fn prepare_owner_host(inst: &Instance, plan: &LaunchPlan) -> Result<()> {
+    anyhow::ensure!(
+        plan.recipe.tier_d_owner_host,
+        "recipe is not an owner-host adapter"
+    );
+    preflight_tier_d(plan)?;
+    let version = plan
+        .recipe
+        .tier_c_electron_host
+        .as_deref()
+        .context("owner-host adapter has no Electron version")?;
+    let archive_hash = plan
+        .recipe
+        .tier_c_electron_sha256
+        .as_deref()
+        .context("owner-host adapter has no Electron archive hash")?;
+    let executable_hash = plan
+        .recipe
+        .tier_c_electron_exe_sha256
+        .as_deref()
+        .context("owner-host adapter has no Electron executable hash")?;
+    let host_source = ensure_electron_host(version, archive_hash, executable_hash)?;
+    let root = owner_host_root(inst);
+    let runtime = root.join("Runtime");
+    let app = root.join("App");
+    copy_install_tree(&host_source, &runtime)?;
+    verify_electron_executable(&runtime.join("electron.exe"), executable_hash)?;
+    let resources = plan
+        .exe
+        .parent()
+        .context("Figma executable has no parent")?
+        .join("resources");
+    std::fs::create_dir_all(&app)?;
+    let mut archive = std::fs::read(resources.join("app.asar"))?;
+    patch_figma_archive(&mut archive)?;
+    anyhow::ensure!(
+        sha256_file_bytes(&archive).eq_ignore_ascii_case(FIGMA_126816_PATCHED_ASAR_SHA256),
+        "Figma patched archive hash mismatch"
+    );
+    std::fs::write(app.join("app.asar"), archive)?;
+    copy_install_tree(
+        &resources.join("app.asar.unpacked"),
+        &app.join("app.asar.unpacked"),
+    )?;
+    let build = app.join("build").join("Release");
+    std::fs::create_dir_all(&build)?;
+    for name in ["bindings.node", "desktop_rust.node"] {
+        std::fs::copy(
+            resources.join("app.asar.unpacked").join(name),
+            build.join(name),
+        )?;
+    }
+    copy_install_tree(
+        &resources.join("FigmaAgent"),
+        &runtime.join("resources").join("FigmaAgent"),
+    )?;
+    let shim = root.join("Shim");
+    std::fs::create_dir_all(&shim)?;
+    std::fs::write(
+        shim.join("package.json"),
+        r#"{"name":"figma","productName":"Figma","version":"126.8.16","main":"main.js"}"#,
+    )?;
+    std::fs::write(shim.join("main.js"), "const path = require('path');\nrequire(path.resolve(__dirname, '..', 'App', 'app.asar'));\n")?;
+    std::fs::create_dir_all(root.join("UserData"))?;
+    Ok(())
+}
+
+fn owner_host_process_active(pid: u32, expected: &Path) -> bool {
+    unsafe {
+        let Ok(process) = OpenProcess(
+            PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE,
+            false,
+            pid,
+        ) else {
+            return false;
+        };
+        let active = WaitForSingleObject(process, 0) == WAIT_TIMEOUT;
+        let mut path = vec![0u16; 32768];
+        let mut length = path.len() as u32;
+        let matches = active
+            && QueryFullProcessImageNameW(
+                process,
+                PROCESS_NAME_FORMAT(0),
+                PWSTR(path.as_mut_ptr()),
+                &mut length,
+            )
+            .is_ok()
+            && String::from_utf16_lossy(&path[..length as usize])
+                .eq_ignore_ascii_case(&expected.to_string_lossy());
+        let _ = CloseHandle(process);
+        matches
+    }
+}
+
+pub fn launch_owner_host(inst: &Instance, plan: &LaunchPlan) -> Result<u32> {
+    anyhow::ensure!(
+        inst.tier_d_adapter.as_deref() == plan.recipe.tier_d_patch.as_deref(),
+        "owner-host adapter metadata mismatch"
+    );
+    let root = owner_host_root(inst);
+    let runtime = root.join("Runtime").join("electron.exe");
+    verify_electron_executable(&runtime, FIGMA_ELECTRON_EXE_SHA256)?;
+    if inst
+        .last_pid
+        .is_some_and(|pid| owner_host_process_active(pid, &runtime))
+    {
+        return Ok(0);
+    }
+    anyhow::ensure!(
+        sha256_file(&root.join("App").join("app.asar"))?
+            .eq_ignore_ascii_case(FIGMA_126816_PATCHED_ASAR_SHA256),
+        "managed Figma archive failed integrity verification"
+    );
+    for (path, expected) in [
+        (
+            root.join("App")
+                .join("build")
+                .join("Release")
+                .join("bindings.node"),
+            FIGMA_126816_BINDINGS_SHA256,
+        ),
+        (
+            root.join("App")
+                .join("build")
+                .join("Release")
+                .join("desktop_rust.node"),
+            FIGMA_126816_DESKTOP_RUST_SHA256,
+        ),
+        (
+            root.join("Runtime")
+                .join("resources")
+                .join("FigmaAgent")
+                .join("figma_agent.exe"),
+            FIGMA_126816_AGENT_SHA256,
+        ),
+    ] {
+        anyhow::ensure!(
+            sha256_file(&path)?.eq_ignore_ascii_case(expected),
+            "managed Figma component failed integrity verification: {}",
+            path.display()
+        );
+    }
+    let mut command = std::process::Command::new(runtime);
+    command.arg(root.join("Shim"));
+    command.arg(format!(
+        "--user-data-dir={}",
+        root.join("UserData").display()
+    ));
+    command.current_dir(root.join("App"));
+    command.env_remove("ELECTRON_RUN_AS_NODE");
+    command.env_remove("ELECTRON_NO_ASAR");
+    command.stdin(std::process::Stdio::null());
+    command.stdout(std::process::Stdio::null());
+    command.stderr(std::process::Stdio::null());
+    Ok(command.spawn()?.id())
+}
+
+pub fn stop_owner_host(inst: &Instance) -> Result<()> {
+    let pid = inst
+        .last_pid
+        .context("owner-host instance has no recorded process")?;
+    let expected = owner_host_root(inst).join("UserData");
+    let script = inst.data_dir().join("stop-owner-host.ps1");
+    std::fs::write(&script, "param([uint32]$ProcessId,[string]$Profile)\n$ErrorActionPreference='Stop'\n$p=Get-CimInstance Win32_Process -Filter \"ProcessId=$ProcessId\"\nif(-not $p){exit 0}\nif(-not $p.CommandLine -or $p.CommandLine.IndexOf($Profile,[StringComparison]::OrdinalIgnoreCase) -lt 0){throw 'owner-host PID identity mismatch'}\n& taskkill.exe /PID $ProcessId /T /F | Out-Null\nif($LASTEXITCODE -ne 0){throw \"taskkill failed: $LASTEXITCODE\"}\n")?;
+    let output = std::process::Command::new("powershell.exe")
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+        ])
+        .arg(&script)
+        .arg("-ProcessId")
+        .arg(pid.to_string())
+        .arg("-Profile")
+        .arg(expected)
+        .output()?;
+    let _ = std::fs::remove_file(script);
+    anyhow::ensure!(
+        output.status.success(),
+        "stopping owner-host instance failed:\n{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
     Ok(())
 }
 
@@ -2658,6 +2963,41 @@ mod tests {
         assert!(patch_slack_electron_fuse(&mut unknown).is_err());
         assert_eq!(SLACK_451191_EXE_SHA256.len(), 64);
         assert_eq!(SLACK_451191_ASAR_SHA256.len(), 64);
+    }
+
+    #[test]
+    fn figma_owner_host_patch_is_exact_idempotent_and_fail_closed() {
+        let mut archive = [
+            b"before".as_slice(),
+            FIGMA_126816_SINGLETON,
+            b"middle".as_slice(),
+            FIGMA_126816_UPDATE_GATE,
+            b"middle".as_slice(),
+            FIGMA_126816_APPDATA,
+            b"after".as_slice(),
+        ]
+        .concat();
+        assert!(patch_figma_archive(&mut archive).unwrap());
+        let once = archive.clone();
+        assert!(!patch_figma_archive(&mut archive).unwrap());
+        assert_eq!(archive, once);
+        let mut duplicate = [
+            FIGMA_126816_SINGLETON,
+            FIGMA_126816_SINGLETON,
+            FIGMA_126816_UPDATE_GATE,
+            FIGMA_126816_APPDATA,
+        ]
+        .concat();
+        assert!(patch_figma_archive(&mut duplicate).is_err());
+        for hash in [
+            FIGMA_126816_EXE_SHA256,
+            FIGMA_126816_ASAR_SHA256,
+            FIGMA_126816_PATCHED_ASAR_SHA256,
+            FIGMA_ELECTRON_ARCHIVE_SHA256,
+            FIGMA_ELECTRON_EXE_SHA256,
+        ] {
+            assert_eq!(hash.len(), 64);
+        }
     }
 
     #[test]

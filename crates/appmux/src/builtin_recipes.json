@@ -67,6 +67,20 @@
     "notes": "Verified for Slack 4.51.191 with the version-gated Tier D Compatibility Shim. AppMux patches only the managed copy after exact executable, app.asar, Electron fuse, singleton, and external-link signature checks. Native sign-in uses an isolated AuthBrowser and a memory-only private callback pipe to the existing Slack instance; the installed original and its slack:// handler remain unchanged."
   },
   {
+    "id": "figma",
+    "display": "Figma",
+    "match_exe": ["figma.exe"],
+    "match_name": ["figma"],
+    "status": "partial",
+    "prefer_tier_c": true,
+    "tier_c_electron_host": "42.9.2",
+    "tier_c_electron_sha256": "9670d8133cba62f9bfa0e29f86410c42649cb16b2e7b273b1b8fed1fa6bb4db9",
+    "tier_c_electron_exe_sha256": "01cabca68ca51a8a1d88d7a8f879273b9e2b7007ba614c07daa5fb8b0d6546de",
+    "tier_d_patch": "figma-owner-host-v1",
+    "tier_d_owner_host": true,
+    "notes": "Figma 126.8.16 uses a version-gated owner-host Compatibility Shim. AppMux verifies the signed Figma executable, archive, native modules, FigmaAgent, and Electron 42.9.2 before creating a managed copy with a private user-data root. The installed original remains unchanged."
+  },
+  {
     "id": "signal",
     "display": "Signal",
     "match_exe": ["signal.exe"],

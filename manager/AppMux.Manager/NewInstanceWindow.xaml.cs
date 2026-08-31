@@ -192,18 +192,24 @@ public partial class NewInstanceWindow
     {
         if (_analysis is null) return;
         var tierD = _analysis.Route == "tier-d";
+        var ownerHost = tierD && !_analysis.RequiresElevation;
         var warning = new Wpf.Ui.Controls.MessageBox
         {
             Title = tierD
                 ? "Compatibility Shim requires a managed copy"
                 : "Native isolation requires a Windows profile",
-            Content = tierD
-                ? "This app requires a curated, version-gated compatibility adapter. AppMux will " +
-                  "create a hidden standard Windows account, mirror a private copy, and modify only " +
-                  "that managed copy after verifying exact executable, resource, and patch-signature " +
-                  "hashes. Vendor updates with unknown hashes are refused. The installed original is " +
-                  "unchanged; no service or driver is installed. Windows will request administrator approval."
-                : "This app needs one hidden standard local account for a genuine separate Windows " +
+            Content = ownerHost
+                ? "This app requires a curated, version-gated owner-host adapter. AppMux will use a " +
+                  "verified matching runtime, modify only a managed copy, and keep its data in a private " +
+                  "profile. Vendor updates with unknown hashes are refused. The installed original is " +
+                  "unchanged; no administrator approval, service, or driver is required."
+                : tierD
+                    ? "This app requires a curated, version-gated compatibility adapter. AppMux will " +
+                      "create a hidden standard Windows account, mirror a private copy, and modify only " +
+                      "that managed copy after verifying exact executable, resource, and patch-signature " +
+                      "hashes. Vendor updates with unknown hashes are refused. The installed original is " +
+                      "unchanged; no service or driver is installed. Windows will request administrator approval."
+                    : "This app needs one hidden standard local account for a genuine separate Windows " +
                   "profile. If the app is installed only for your account, AppMux mirrors a private " +
                   "runnable copy into that isolated profile. Windows will request administrator " +
                   "approval. No service or driver is installed, and the original app is unchanged.",
@@ -223,14 +229,24 @@ public partial class NewInstanceWindow
             FailProgress(created.Output);
             return;
         }
-        SetProgress("Waiting for administrator approval...", 35, true);
-        var elevated = await Core.RunElevatedAppmuxAsync(
-            "tier-c", "prepare", "--app", _analysis.AppId, "--instance", name);
-        if (elevated != 0)
+        var preparation = 0;
+        if (_analysis.RequiresElevation)
         {
-            FailProgress(elevated == 1223
+            SetProgress("Waiting for administrator approval...", 35, true);
+            preparation = await Core.RunElevatedAppmuxAsync(
+                "tier-c", "prepare", "--app", _analysis.AppId, "--instance", name);
+        }
+        else
+        {
+            SetProgress("Building the verified compatibility adapter...", 35, true);
+            preparation = (await Core.RunAppmuxAsync(
+                "tier-c", "prepare", "--app", _analysis.AppId, "--instance", name)).Code;
+        }
+        if (preparation != 0)
+        {
+            FailProgress(preparation == 1223
                 ? "Administrator approval was cancelled."
-                : $"Strong isolation setup failed ({elevated}). The instance card was kept so setup can be retried.");
+                : $"Compatibility setup failed ({preparation}). The instance card was kept so setup can be retried.");
             return;
         }
         SetProgress("Isolation is ready. Launching the app...", 82);

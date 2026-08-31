@@ -48,6 +48,8 @@ pub struct Recipe {
     #[serde(default)]
     pub tier_d_patch: Option<String>,
     #[serde(default)]
+    pub tier_d_owner_host: bool,
+    #[serde(default)]
     pub notes: String,
 }
 
@@ -103,6 +105,10 @@ mod tests {
         assert_eq!(slack.tier_c_electron_host.as_deref(), Some("43.4.0"));
         assert_eq!(slack.tier_c_electron_app.as_deref(), Some("slack.exe"));
         assert_eq!(slack.tier_c_protocol.as_deref(), Some("slack"));
+        let figma = recipes.iter().find(|r| r.id == "figma").unwrap();
+        assert!(figma.tier_d_owner_host);
+        assert_eq!(figma.tier_d_patch.as_deref(), Some("figma-owner-host-v1"));
+        assert_eq!(figma.tier_c_electron_host.as_deref(), Some("42.9.2"));
         for r in &recipes {
             assert!(
                 matches!(
@@ -152,6 +158,7 @@ pub fn generic(app_id: &str, display: &str) -> Recipe {
         tier_c_electron_exe_sha256: None,
         tier_c_protocol: None,
         tier_d_patch: None,
+        tier_d_owner_host: false,
         notes: "Generic environment redirection. Isolation may be partial: apps that resolve \
                 known folders through the Windows shell API ignore environment variables."
             .to_string(),
