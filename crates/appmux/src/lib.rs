@@ -232,7 +232,74 @@ enum PackageLabCmd {
 #[derive(Subcommand)]
 enum TierCCmd {
     #[command(hide = true)]
-    InitProfile,
+    InitProfile {
+        #[arg(long)]
+        protocol: Option<String>,
+        #[arg(long)]
+        helper: Option<String>,
+        #[arg(long)]
+        host: Option<String>,
+        #[arg(long)]
+        hosted_app: Option<String>,
+        #[arg(long)]
+        shim_target: Option<String>,
+        #[arg(long)]
+        auth_app: Option<String>,
+        #[arg(long)]
+        profile: Option<String>,
+        #[arg(long)]
+        icon: Option<String>,
+        #[arg(long)]
+        app_user_model_id: Option<String>,
+        #[arg(long)]
+        status: Option<String>,
+    },
+    #[command(hide = true)]
+    HostElectron {
+        #[arg(long)]
+        host: String,
+        #[arg(long)]
+        hosted_app: String,
+        #[arg(long)]
+        shim_target: Option<String>,
+        #[arg(long)]
+        profile: Option<String>,
+        #[arg(long)]
+        auth_app: Option<String>,
+        #[arg(long)]
+        status: Option<String>,
+        #[arg(long)]
+        icon: String,
+        #[arg(long)]
+        app_user_model_id: String,
+        #[arg(long)]
+        job_name: Option<String>,
+        #[arg(long)]
+        uri: Option<String>,
+    },
+    #[command(hide = true)]
+    DeferHostElectron {
+        #[arg(long)]
+        wait_pid: u32,
+        #[arg(long)]
+        host: String,
+        #[arg(long)]
+        hosted_app: String,
+        #[arg(long)]
+        shim_target: String,
+        #[arg(long)]
+        profile: String,
+        #[arg(long)]
+        auth_app: String,
+        #[arg(long)]
+        status: String,
+        #[arg(long)]
+        icon: String,
+        #[arg(long)]
+        app_user_model_id: String,
+        #[arg(long)]
+        job_name: Option<String>,
+    },
     /// Provision the instance account (requires elevation; no app ACL changes)
     Prepare {
         #[arg(long)]
@@ -445,6 +512,30 @@ fn analyze(target: &str) -> Result<AutoAnalysis> {
     }
     if plan.recipe.prefer_web && plan.recipe.web_url.is_some() {
         return Ok(web_analysis(&plan, plan.recipe.notes.clone()));
+    }
+    if plan.recipe.tier_d_patch.is_some() {
+        let preflight = account::preflight_tier_d(&plan);
+        return Ok(AutoAnalysis {
+            app_id: plan.app_id,
+            display: plan.display,
+            route: if preflight.is_ok() { "tier-d" } else { "unsupported" }.into(),
+            confidence: if preflight.is_ok() {
+                "version-gated"
+            } else {
+                "adapter-update-required"
+            }
+            .into(),
+            packaged: false,
+            requires_elevation: preflight.is_ok(),
+            requires_package_consent: false,
+            strip_services: false,
+            web_url: None,
+            reason: preflight.err().map_or(plan.recipe.notes, |error| error.to_string()),
+            warnings: vec![
+                "Tier D modifies only an AppMux-managed copy; the vendor installation remains unchanged."
+                    .into(),
+            ],
+        });
     }
     if plan.recipe.prefer_tier_c {
         return Ok(AutoAnalysis {
@@ -695,6 +786,7 @@ fn run(
                 last_used: store::now(),
                 isolation: "recipe".to_string(),
                 windows_user: None,
+                tier_d_adapter: None,
                 package_aumid: None,
                 protocols: Vec::new(),
                 profile_args: Vec::new(),
@@ -861,6 +953,7 @@ fn web_command(cmd: WebCmd) -> Result<()> {
                 last_used: store::now(),
                 isolation: "web".into(),
                 windows_user: None,
+                tier_d_adapter: None,
                 package_aumid: None,
                 protocols: Vec::new(),
                 profile_args: Vec::new(),
@@ -882,10 +975,35 @@ fn web_command(cmd: WebCmd) -> Result<()> {
     }
 }
 
+fn owner_routed_protocols(_recipe: &recipes::Recipe) -> Vec<String> {
+    Vec::new()
+}
+
 fn protocol_command(cmd: ProtocolCmd) -> Result<()> {
     match cmd {
         ProtocolCmd::Sync => {
-            let count = shellmenu::sync_protocols(&Db::load()?)?;
+            let mut db = Db::load()?;
+            let mut changed = false;
+            for instance in &mut db.instances {
+                if instance.isolation != "account" {
+                    continue;
+                }
+                if let Ok(plan) = launch::plan(&instance.app_path) {
+                    let protocols = owner_routed_protocols(&plan.recipe);
+                    if instance.protocols != protocols {
+                        instance.protocols = protocols;
+                        changed = true;
+                    }
+                    if instance.tier_d_adapter != plan.recipe.tier_d_patch {
+                        instance.tier_d_adapter = plan.recipe.tier_d_patch;
+                        changed = true;
+                    }
+                }
+            }
+            if changed {
+                db.save()?;
+            }
+            let count = shellmenu::sync_protocols(&db)?;
             console::info(&format!(
                 "Registered AppMux router for {count} protocol(s)."
             ));
@@ -1059,6 +1177,7 @@ fn package_lab_command(cmd: PackageLabCmd) -> Result<()> {
                 last_used: store::now(),
                 isolation: "package".to_string(),
                 windows_user: None,
+                tier_d_adapter: None,
                 package_aumid: Some(aumid.clone()),
                 protocols: report.protocols.clone(),
                 profile_args: package_lab::profile_arguments(&report, target_path),
@@ -1081,12 +1200,89 @@ fn package_lab_command(cmd: PackageLabCmd) -> Result<()> {
 }
 
 fn tier_c(cmd: TierCCmd) -> Result<()> {
-    if let TierCCmd::InitProfile = &cmd {
-        return account::initialize_known_folders();
+    match &cmd {
+        TierCCmd::InitProfile {
+            protocol,
+            helper,
+            host,
+            hosted_app,
+            shim_target,
+            auth_app,
+            profile,
+            icon,
+            app_user_model_id,
+            status,
+        } => {
+            return account::initialize_profile(
+                protocol.as_deref(),
+                helper.as_deref().map(std::path::Path::new),
+                host.as_deref().map(std::path::Path::new),
+                hosted_app.as_deref().map(std::path::Path::new),
+                shim_target.as_deref().map(std::path::Path::new),
+                profile.as_deref().map(std::path::Path::new),
+                auth_app.as_deref().map(std::path::Path::new),
+                status.as_deref().map(std::path::Path::new),
+                icon.as_deref().map(std::path::Path::new),
+                app_user_model_id.as_deref(),
+            );
+        }
+        TierCCmd::HostElectron {
+            host,
+            hosted_app,
+            shim_target,
+            profile,
+            auth_app,
+            status,
+            icon,
+            app_user_model_id,
+            job_name,
+            uri,
+        } => {
+            return account::host_electron(
+                std::path::Path::new(host),
+                std::path::Path::new(hosted_app),
+                shim_target.as_deref().map(std::path::Path::new),
+                profile.as_deref().map(std::path::Path::new),
+                auth_app.as_deref().map(std::path::Path::new),
+                status.as_deref().map(std::path::Path::new),
+                std::path::Path::new(icon),
+                app_user_model_id,
+                job_name.as_deref(),
+                uri.as_deref(),
+            );
+        }
+        TierCCmd::DeferHostElectron {
+            wait_pid,
+            host,
+            hosted_app,
+            shim_target,
+            profile,
+            auth_app,
+            status,
+            icon,
+            app_user_model_id,
+            job_name,
+        } => {
+            return account::defer_host_electron(
+                *wait_pid,
+                std::path::Path::new(host),
+                std::path::Path::new(hosted_app),
+                std::path::Path::new(shim_target),
+                std::path::Path::new(profile),
+                std::path::Path::new(auth_app),
+                std::path::Path::new(status),
+                std::path::Path::new(icon),
+                app_user_model_id,
+                job_name.as_deref(),
+            );
+        }
+        _ => {}
     }
     let mut db = Db::load()?;
     match cmd {
-        TierCCmd::InitProfile => unreachable!(),
+        TierCCmd::InitProfile { .. }
+        | TierCCmd::HostElectron { .. }
+        | TierCCmd::DeferHostElectron { .. } => unreachable!(),
         TierCCmd::Prepare { app, instance } => {
             let inst = db
                 .find(&app, &instance)
@@ -1103,10 +1299,15 @@ fn tier_c(cmd: TierCCmd) -> Result<()> {
             let saved = db.find(&app, &instance).expect("instance disappeared");
             saved.isolation = "account".to_string();
             saved.windows_user = Some(username.clone());
+            saved.tier_d_adapter = plan.recipe.tier_d_patch.clone();
+            saved.protocols = owner_routed_protocols(&plan.recipe);
             db.save()?;
-            console::info(&format!(
-                "Tier C ready for {app} / {instance} (hidden account: {username})."
-            ));
+            let _ = shellmenu::sync_protocols(&db);
+            if console::has_console() {
+                console::info(&format!(
+                    "Tier C ready for {app} / {instance} (hidden account: {username})."
+                ));
+            }
             Ok(())
         }
         TierCCmd::Status { app, instance } => {
@@ -1152,6 +1353,7 @@ fn tier_c(cmd: TierCCmd) -> Result<()> {
             let saved = db.find(&app, &instance).expect("instance disappeared");
             saved.isolation = "recipe".to_string();
             saved.windows_user = None;
+            saved.tier_d_adapter = None;
             db.save()?;
             drop(db);
             remove(&app, &instance, purge)
@@ -1178,7 +1380,9 @@ fn make_shortcut(app: &str, instance: &str) -> Result<()> {
 fn list_recipes() -> Result<()> {
     println!("{:<12} {:<22} {:<10} {}", "ID", "APP", "STATUS", "TIER");
     for r in recipes::all() {
-        let tier = if !r.args.is_empty() && !r.redirect_env.is_empty() {
+        let tier = if r.tier_d_patch.is_some() {
+            "D (shim)"
+        } else if !r.args.is_empty() && !r.redirect_env.is_empty() {
             "A+B"
         } else if !r.args.is_empty() {
             "A (flags)"
@@ -1192,7 +1396,7 @@ fn list_recipes() -> Result<()> {
 
 #[cfg(test)]
 mod auto_route_tests {
-    use super::unpackaged_route;
+    use super::{owner_routed_protocols, unpackaged_route};
 
     #[test]
     fn auto_uses_lightest_known_route_and_escalates_unknown_apps() {
@@ -1201,5 +1405,15 @@ mod auto_route_tests {
         assert_eq!(unpackaged_route("partial", true), ("recipe-a", true));
         assert_eq!(unpackaged_route("unverified", false), ("tier-c", false));
         assert_eq!(unpackaged_route("blocked", true), ("tier-c", false));
+    }
+
+    #[test]
+    fn tier_d_callbacks_are_not_registered_in_the_owner_profile() {
+        let slack = crate::recipes::builtin()
+            .into_iter()
+            .find(|recipe| recipe.id == "slack")
+            .unwrap();
+        assert!(slack.tier_d_patch.is_some());
+        assert!(owner_routed_protocols(&slack).is_empty());
     }
 }

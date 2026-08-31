@@ -44,6 +44,10 @@ pub struct Recipe {
     #[serde(default)]
     pub tier_c_electron_exe_sha256: Option<String>,
     #[serde(default)]
+    pub tier_c_protocol: Option<String>,
+    #[serde(default)]
+    pub tier_d_patch: Option<String>,
+    #[serde(default)]
     pub notes: String,
 }
 
@@ -98,6 +102,7 @@ mod tests {
         assert!(slack.prefer_tier_c);
         assert_eq!(slack.tier_c_electron_host.as_deref(), Some("43.4.0"));
         assert_eq!(slack.tier_c_electron_app.as_deref(), Some("slack.exe"));
+        assert_eq!(slack.tier_c_protocol.as_deref(), Some("slack"));
         for r in &recipes {
             assert!(
                 matches!(
@@ -145,6 +150,8 @@ pub fn generic(app_id: &str, display: &str) -> Recipe {
         tier_c_electron_app: None,
         tier_c_electron_sha256: None,
         tier_c_electron_exe_sha256: None,
+        tier_c_protocol: None,
+        tier_d_patch: None,
         notes: "Generic environment redirection. Isolation may be partial: apps that resolve \
                 known folders through the Windows shell API ignore environment variables."
             .to_string(),

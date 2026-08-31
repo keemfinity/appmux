@@ -7,11 +7,12 @@ use crate::{launch::LaunchPlan, store::Instance};
 use anyhow::{bail, Context, Result};
 use sha2::{Digest, Sha256};
 use std::ffi::c_void;
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use windows::core::{PCWSTR, PWSTR};
 use windows::Win32::Foundation::{
-    CloseHandle, DuplicateHandle, LocalFree, DUPLICATE_SAME_ACCESS, HANDLE, HLOCAL, WAIT_OBJECT_0,
+    CloseHandle, DuplicateHandle, LocalFree, BOOL, DUPLICATE_SAME_ACCESS, E_ACCESSDENIED, HANDLE,
+    HLOCAL, WAIT_OBJECT_0, WAIT_TIMEOUT,
 };
 use windows::Win32::NetworkManagement::NetManagement::{
     NERR_UserExists, NetUserAdd, NetUserDel, UF_DONT_EXPIRE_PASSWD, UF_NORMAL_ACCOUNT, UF_SCRIPT,
@@ -19,7 +20,7 @@ use windows::Win32::NetworkManagement::NetManagement::{
 };
 use windows::Win32::Security::Authorization::{
     GetSecurityInfo, SetEntriesInAclW, SetSecurityInfo, EXPLICIT_ACCESS_W, GRANT_ACCESS,
-    SE_WINDOW_OBJECT, TRUSTEE_IS_NAME, TRUSTEE_IS_USER,
+    SE_KERNEL_OBJECT, SE_OBJECT_TYPE, SE_WINDOW_OBJECT, TRUSTEE_IS_NAME, TRUSTEE_IS_USER,
 };
 use windows::Win32::Security::Cryptography::{
     BCryptGenRandom, CryptProtectData, CryptUnprotectData, BCRYPT_USE_SYSTEM_PREFERRED_RNG,
@@ -31,21 +32,38 @@ use windows::Win32::Security::{
 };
 use windows::Win32::System::Environment::{CreateEnvironmentBlock, DestroyEnvironmentBlock};
 use windows::Win32::System::JobObjects::{
-    AssignProcessToJobObject, CreateJobObjectW, OpenJobObjectW, TerminateJobObject,
+    AssignProcessToJobObject, CreateJobObjectW, IsProcessInJob,
+    JobObjectBasicAccountingInformation, OpenJobObjectW, QueryInformationJobObject,
+    TerminateJobObject, JOBOBJECT_BASIC_ACCOUNTING_INFORMATION,
 };
 use windows::Win32::System::StationsAndDesktops::{
     CloseDesktop, CloseWindowStation, OpenDesktopW, OpenWindowStationW, DESKTOP_CONTROL_FLAGS,
 };
 use windows::Win32::System::SystemServices::JOB_OBJECT_TERMINATE;
 use windows::Win32::System::Threading::{
-    CreateProcessWithLogonW, GetCurrentProcess, GetExitCodeProcess, ResumeThread, TerminateProcess,
-    WaitForSingleObject, CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT, LOGON_WITH_PROFILE,
-    PROCESS_INFORMATION, STARTUPINFOW,
+    CreateProcessWithLogonW, GetCurrentProcess, GetExitCodeProcess, OpenProcess, ResumeThread,
+    TerminateProcess, WaitForSingleObject, CREATE_BREAKAWAY_FROM_JOB, CREATE_SUSPENDED,
+    CREATE_UNICODE_ENVIRONMENT, LOGON_WITH_PROFILE, PROCESS_INFORMATION, PROCESS_SYNCHRONIZE,
+    STARTUPINFOW,
 };
-use winreg::enums::{HKEY_LOCAL_MACHINE, KEY_WRITE};
+use winreg::enums::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_WRITE};
 use winreg::RegKey;
 
 const CREDENTIAL_FILE: &str = "tier-c.credential";
+const SLACK_451191_EXE_SHA256: &str =
+    "aa45421e2f80d72402169eb3a81b740b045422c8968edd0cbdadcdf35bd2f170";
+const SLACK_451191_ASAR_SHA256: &str =
+    "4dabfcddd110a9be9d9e1725d8b6e87825c25ee3744f7b013a1ce7536aaf717e";
+const ELECTRON_FUSE_SENTINEL: &[u8] = b"dL7pKGdnNz796PbbjQWNKmHXBZaB9tsX";
+const SLACK_451191_FUSES: &[u8] = b"\x01\x09010011001";
+const SLACK_451191_PATCHED_FUSES: &[u8] = b"\x01\x09010001001";
+const SLACK_451191_SINGLETON: &[u8] = b"l.app.requestSingleInstanceLock((0,o._K)())";
+const SLACK_451191_OPEN_EXTERNAL: &[u8] = b"oe.shell.openExternal";
+const SLACK_451191_APPMUX_OPEN_EXTERNAL: &[u8] = b"global.appmuxOpen    ";
+const SLACK_451191_OPEN_EXTERNAL_SELECTOR: &[u8] = b"const I=n?Vp:y_";
+const SLACK_451191_APPMUX_SELECTOR: &[u8] = b"const I=Vp     ";
+const MAX_DEFERRED_PROTOCOL_URI_LEN: usize = 8192;
+const DEFERRED_PROTOCOL_WAIT_MS: u32 = 30_000;
 
 fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
@@ -128,8 +146,9 @@ fn unprotect(encrypted: &[u8]) -> Result<String> {
     }
 }
 
-unsafe fn grant_window_object(
+unsafe fn grant_object(
     handle: HANDLE,
+    object_type: SE_OBJECT_TYPE,
     username: &mut [u16],
     permissions: u32,
 ) -> Result<()> {
@@ -137,7 +156,7 @@ unsafe fn grant_window_object(
     let mut descriptor = windows::Win32::Security::PSECURITY_DESCRIPTOR::default();
     let status = GetSecurityInfo(
         handle,
-        SE_WINDOW_OBJECT,
+        object_type,
         DACL_SECURITY_INFORMATION,
         None,
         None,
@@ -166,7 +185,7 @@ unsafe fn grant_window_object(
     }
     let set_status = SetSecurityInfo(
         handle,
-        SE_WINDOW_OBJECT,
+        object_type,
         DACL_SECURITY_INFORMATION,
         None,
         None,
@@ -196,8 +215,18 @@ fn grant_interactive_desktop(username: &str) -> Result<()> {
             false,
             0x0002_0000 | 0x0004_0000,
         )?;
-        let window_result = grant_window_object(HANDLE(winsta.0), &mut username_w, 0x1000_0000);
-        let desktop_result = grant_window_object(HANDLE(desktop.0), &mut username_w, 0x1000_0000);
+        let window_result = grant_object(
+            HANDLE(winsta.0),
+            SE_WINDOW_OBJECT,
+            &mut username_w,
+            0x1000_0000,
+        );
+        let desktop_result = grant_object(
+            HANDLE(desktop.0),
+            SE_WINDOW_OBJECT,
+            &mut username_w,
+            0x1000_0000,
+        );
         let _ = CloseDesktop(desktop);
         let _ = CloseWindowStation(winsta);
         window_result?;
@@ -205,10 +234,17 @@ fn grant_interactive_desktop(username: &str) -> Result<()> {
     }
 }
 
-/// Elevated operation. Creates a standard local account, hides its login tile,
-/// and stores its random password DPAPI-encrypted. It never touches WindowsApps
-/// or target-app ACLs.
-fn run_profile_initializer(username: &str, password: &str) -> Result<()> {
+fn grant_job_access(handle: HANDLE, username: &str) -> Result<()> {
+    let mut username_w = wide(username);
+    unsafe { grant_object(handle, SE_KERNEL_OBJECT, &mut username_w, 0x001f_001f) }
+}
+
+fn run_profile_initializer(
+    inst: &Instance,
+    plan: &LaunchPlan,
+    username: &str,
+    password: &str,
+) -> Result<()> {
     let helper = profile_root(username)
         .join("AppData")
         .join("Local")
@@ -227,10 +263,39 @@ fn run_profile_initializer(username: &str, password: &str) -> Result<()> {
             .context("profile initializer has no parent")?,
         username,
     )?;
-    let command = format!(
+    let mut command = format!(
         "{} tier-c init-profile",
         quote_arg(&helper.to_string_lossy())
     );
+    if plan.recipe.tier_d_patch.is_some() {
+        let mut stored = inst.clone();
+        stored.windows_user = Some(username.to_string());
+        let config = electron_host_config(&stored, plan, username)?;
+        let protocol = plan
+            .recipe
+            .tier_c_protocol
+            .as_deref()
+            .context("Tier D app has no callback protocol")?;
+        let public = std::env::var_os("PUBLIC")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(r"C:\Users\Public"));
+        let status = public
+            .join("Documents")
+            .join(format!("AppMux-Auth-{username}.json"));
+        command.push_str(&format!(
+            " --protocol {} --helper {} --host {} --hosted-app {} --shim-target {} --profile {} --auth-app {} --status {} --icon {} --app-user-model-id {}",
+            quote_arg(protocol),
+            quote_arg(&config.helper.to_string_lossy()),
+            quote_arg(&config.host.to_string_lossy()),
+            quote_arg(&config.shim_app.to_string_lossy()),
+            quote_arg(&config.app.to_string_lossy()),
+            quote_arg(&config.user_data.to_string_lossy()),
+            quote_arg(&config.auth_app.to_string_lossy()),
+            quote_arg(&status.to_string_lossy()),
+            quote_arg(&config.icon.to_string_lossy()),
+            quote_arg(&config.app_user_model_id)
+        ));
+    }
     spawn_with_password(
         username,
         password,
@@ -240,18 +305,22 @@ fn run_profile_initializer(username: &str, password: &str) -> Result<()> {
         false,
         true,
         None,
+        false,
     )?;
     Ok(())
 }
 
+/// Elevated operation. Creates a standard local account, hides its login tile,
+/// and stores its random password DPAPI-encrypted. It never touches WindowsApps
+/// or target-app ACLs.
 pub fn provision(inst: &Instance, plan: &LaunchPlan) -> Result<String> {
     let username = account_name(&inst.app_id, &inst.name);
     let cred = credential_path(inst);
     if cred.exists() {
         grant_interactive_desktop(&username)?;
         let password = unprotect(&std::fs::read(&cred)?)?;
-        run_profile_initializer(&username, &password)?;
         stage_per_user_app(inst, plan, &username)?;
+        run_profile_initializer(inst, plan, &username, &password)?;
         return Ok(username);
     }
 
@@ -303,9 +372,10 @@ pub fn provision(inst: &Instance, plan: &LaunchPlan) -> Result<String> {
             false,
             true,
             None,
+            false,
         )?;
-        run_profile_initializer(&username, &password)?;
         stage_per_user_app(inst, plan, &username)?;
+        run_profile_initializer(inst, plan, &username, &password)?;
         Ok(())
     })();
 
@@ -341,6 +411,348 @@ fn quote_arg(s: &str) -> String {
     out.push_str(&"\\".repeat(slashes * 2));
     out.push('"');
     out
+}
+
+#[derive(Clone, Copy, Debug)]
+struct ElectronHostCommandConfig<'a> {
+    helper: &'a Path,
+    host: &'a Path,
+    hosted_app: &'a Path,
+    shim_target: &'a Path,
+    profile: &'a Path,
+    auth_app: &'a Path,
+    status: &'a Path,
+    icon: &'a Path,
+    app_user_model_id: &'a str,
+}
+
+#[derive(Clone, Copy, Default)]
+struct ProfileInitializationOptions<'a> {
+    protocol: Option<&'a str>,
+    helper: Option<&'a Path>,
+    host: Option<&'a Path>,
+    hosted_app: Option<&'a Path>,
+    shim_target: Option<&'a Path>,
+    profile: Option<&'a Path>,
+    auth_app: Option<&'a Path>,
+    status: Option<&'a Path>,
+    icon: Option<&'a Path>,
+    app_user_model_id: Option<&'a str>,
+}
+
+fn complete_profile_initialization<'a>(
+    options: ProfileInitializationOptions<'a>,
+) -> Result<Option<(&'a str, ElectronHostCommandConfig<'a>)>> {
+    let missing: Vec<_> = [
+        ("protocol", options.protocol.is_none()),
+        ("helper", options.helper.is_none()),
+        ("host", options.host.is_none()),
+        ("hosted-app", options.hosted_app.is_none()),
+        ("shim-target", options.shim_target.is_none()),
+        ("profile", options.profile.is_none()),
+        ("auth-app", options.auth_app.is_none()),
+        ("status", options.status.is_none()),
+        ("icon", options.icon.is_none()),
+        ("app-user-model-id", options.app_user_model_id.is_none()),
+    ]
+    .into_iter()
+    .filter_map(|(name, is_missing)| is_missing.then_some(name))
+    .collect();
+    if missing.len() == 10 {
+        return Ok(None);
+    }
+    anyhow::ensure!(
+        missing.is_empty(),
+        "incomplete Tier D profile configuration; missing: {}",
+        missing.join(", ")
+    );
+    Ok(Some((
+        options.protocol.expect("validated protocol"),
+        ElectronHostCommandConfig {
+            helper: options.helper.expect("validated helper"),
+            host: options.host.expect("validated host"),
+            hosted_app: options.hosted_app.expect("validated hosted app"),
+            shim_target: options.shim_target.expect("validated shim target"),
+            profile: options.profile.expect("validated profile"),
+            auth_app: options.auth_app.expect("validated auth app"),
+            status: options.status.expect("validated status"),
+            icon: options.icon.expect("validated icon"),
+            app_user_model_id: options
+                .app_user_model_id
+                .expect("validated app user model id"),
+        },
+    )))
+}
+
+fn path_is_within_profile(user_profile: &Path, path: &Path) -> bool {
+    user_profile.is_absolute()
+        && path.is_absolute()
+        && path.strip_prefix(user_profile).is_ok_and(|relative| {
+            !relative.as_os_str().is_empty()
+                && relative
+                    .components()
+                    .all(|component| matches!(component, std::path::Component::Normal(_)))
+        })
+}
+
+fn validate_profile_protocol_config(
+    protocol: &str,
+    user_profile: &Path,
+    public_profile: &Path,
+    config: ElectronHostCommandConfig<'_>,
+) -> Result<()> {
+    anyhow::ensure!(protocol == "slack", "unsupported Tier D protocol");
+    anyhow::ensure!(
+        config.app_user_model_id.starts_with("AppMux.")
+            && config
+                .app_user_model_id
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_')),
+        "invalid Tier D AppUserModelID"
+    );
+    let hidden_paths = [
+        config.helper,
+        config.host,
+        config.hosted_app,
+        config.shim_target,
+        config.profile,
+        config.auth_app,
+        config.icon,
+    ];
+    anyhow::ensure!(
+        hidden_paths
+            .into_iter()
+            .all(|path| path_is_within_profile(user_profile, path)),
+        "Tier D authentication file is outside the isolated profile"
+    );
+    let username = user_profile
+        .file_name()
+        .context("Tier D profile has no account name")?;
+    let expected_status = public_profile
+        .join("Documents")
+        .join(format!("AppMux-Auth-{}.json", username.to_string_lossy()));
+    anyhow::ensure!(
+        config.status == expected_status,
+        "Tier D authentication status path is not the expected public handoff file"
+    );
+    Ok(())
+}
+
+fn validate_callback_uri(uri: &str) -> Result<()> {
+    anyhow::ensure!(
+        !uri.is_empty() && uri.len() <= MAX_DEFERRED_PROTOCOL_URI_LEN,
+        "callback URI has an invalid length"
+    );
+    anyhow::ensure!(
+        !uri.chars().any(char::is_control),
+        "callback URI contains control characters"
+    );
+    let payload = uri
+        .strip_prefix("slack:")
+        .context("unsupported callback URI scheme")?;
+    anyhow::ensure!(!payload.is_empty(), "callback URI has no payload");
+    Ok(())
+}
+
+fn validate_wait_pid(wait_pid: u32, current_pid: u32) -> Result<()> {
+    anyhow::ensure!(
+        wait_pid != 0 && wait_pid != current_pid,
+        "invalid deferred host wait PID"
+    );
+    Ok(())
+}
+
+fn read_callback_uri(reader: &mut impl Read) -> Result<String> {
+    let mut bytes = Vec::with_capacity(MAX_DEFERRED_PROTOCOL_URI_LEN + 1);
+    reader
+        .take((MAX_DEFERRED_PROTOCOL_URI_LEN + 1) as u64)
+        .read_to_end(&mut bytes)
+        .context("reading the callback URI from stdin")?;
+    anyhow::ensure!(
+        bytes.len() <= MAX_DEFERRED_PROTOCOL_URI_LEN,
+        "callback URI exceeds the maximum length"
+    );
+    let uri = String::from_utf8(bytes).context("callback URI from stdin is not valid UTF-8")?;
+    validate_callback_uri(&uri)?;
+    Ok(uri)
+}
+
+#[derive(Clone, Copy, Debug)]
+struct DeferredHostElectronPlan<'a> {
+    wait_pid: u32,
+    helper: &'a Path,
+    host: &'a Path,
+    hosted_app: &'a Path,
+    shim_target: &'a Path,
+    profile: &'a Path,
+    auth_app: &'a Path,
+    status: &'a Path,
+    icon: &'a Path,
+    app_user_model_id: &'a str,
+    job_name: Option<&'a str>,
+}
+
+fn validate_deferred_host_plan(
+    plan: DeferredHostElectronPlan<'_>,
+    current_pid: u32,
+    user_profile: &Path,
+    public_profile: &Path,
+) -> Result<()> {
+    validate_wait_pid(plan.wait_pid, current_pid)?;
+    validate_profile_protocol_config(
+        "slack",
+        user_profile,
+        public_profile,
+        ElectronHostCommandConfig {
+            helper: plan.helper,
+            host: plan.host,
+            hosted_app: plan.hosted_app,
+            shim_target: plan.shim_target,
+            profile: plan.profile,
+            auth_app: plan.auth_app,
+            status: plan.status,
+            icon: plan.icon,
+            app_user_model_id: plan.app_user_model_id,
+        },
+    )?;
+    if let Some(name) = plan.job_name {
+        anyhow::ensure!(
+            name.starts_with(r"Local\AppMux.TierC.")
+                && name
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | '\\')),
+            "invalid deferred host job name"
+        );
+    }
+    Ok(())
+}
+
+fn validate_deferred_host_paths(
+    plan: DeferredHostElectronPlan<'_>,
+    user_profile: &Path,
+) -> Result<()> {
+    let canonical_profile = std::fs::canonicalize(user_profile)
+        .context("resolving the deferred host USERPROFILE path")?;
+    for path in [
+        plan.helper,
+        plan.host,
+        plan.hosted_app,
+        plan.shim_target,
+        plan.profile,
+        plan.auth_app,
+        plan.icon,
+    ] {
+        let canonical = std::fs::canonicalize(path)
+            .with_context(|| format!("resolving deferred host path {}", path.display()))?;
+        anyhow::ensure!(
+            canonical.starts_with(&canonical_profile),
+            "deferred host path resolves outside the isolated profile"
+        );
+    }
+    Ok(())
+}
+
+fn wait_for_auth_process(wait_pid: u32) -> Result<()> {
+    let process = unsafe { OpenProcess(PROCESS_SYNCHRONIZE, false, wait_pid) }
+        .context("OpenProcess failed for the authentication process")?;
+    let wait_result = unsafe { WaitForSingleObject(process, DEFERRED_PROTOCOL_WAIT_MS) };
+    let wait_error = (wait_result != WAIT_OBJECT_0 && wait_result != WAIT_TIMEOUT)
+        .then(windows::core::Error::from_win32);
+    unsafe {
+        let _ = CloseHandle(process);
+    }
+    anyhow::ensure!(
+        wait_result != WAIT_TIMEOUT,
+        "authentication process did not exit before the deferred host timeout"
+    );
+    if let Some(error) = wait_error {
+        return Err(error).context("WaitForSingleObject failed for the authentication process");
+    }
+    Ok(())
+}
+
+struct PreparedDeferredHostLaunch<'a> {
+    plan: DeferredHostElectronPlan<'a>,
+    uri: String,
+}
+
+fn prepare_deferred_host_launch<'a>(
+    reader: &mut impl Read,
+    plan: DeferredHostElectronPlan<'a>,
+    current_pid: u32,
+    user_profile: &Path,
+    public_profile: &Path,
+) -> Result<PreparedDeferredHostLaunch<'a>> {
+    validate_deferred_host_plan(plan, current_pid, user_profile, public_profile)?;
+    let uri = read_callback_uri(reader)?;
+    Ok(PreparedDeferredHostLaunch { plan, uri })
+}
+
+fn launch_prepared_deferred_host(
+    prepared: &PreparedDeferredHostLaunch<'_>,
+    launch: impl FnOnce(DeferredHostElectronPlan<'_>, &str) -> Result<()>,
+) -> Result<()> {
+    launch(prepared.plan, &prepared.uri)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn defer_host_electron(
+    wait_pid: u32,
+    host: &Path,
+    hosted_app: &Path,
+    shim_target: &Path,
+    profile: &Path,
+    auth_app: &Path,
+    status: &Path,
+    icon: &Path,
+    app_user_model_id: &str,
+    job_name: Option<&str>,
+) -> Result<()> {
+    let helper = std::env::current_exe().context("deferred host helper path is unavailable")?;
+    let user_profile = std::env::var_os("USERPROFILE")
+        .map(PathBuf::from)
+        .context("deferred host has no USERPROFILE")?;
+    let public_profile = std::env::var_os("PUBLIC")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(r"C:\Users\Public"));
+    let plan = DeferredHostElectronPlan {
+        wait_pid,
+        helper: &helper,
+        host,
+        hosted_app,
+        shim_target,
+        profile,
+        auth_app,
+        status,
+        icon,
+        app_user_model_id,
+        job_name,
+    };
+    let stdin = std::io::stdin();
+    let mut stdin = stdin.lock();
+    let prepared = prepare_deferred_host_launch(
+        &mut stdin,
+        plan,
+        std::process::id(),
+        &user_profile,
+        &public_profile,
+    )?;
+    validate_deferred_host_paths(prepared.plan, &user_profile)?;
+    wait_for_auth_process(prepared.plan.wait_pid)?;
+    launch_prepared_deferred_host(&prepared, |plan, uri| {
+        host_electron(
+            plan.host,
+            plan.hosted_app,
+            Some(plan.shim_target),
+            Some(plan.profile),
+            Some(plan.auth_app),
+            Some(plan.status),
+            plan.icon,
+            plan.app_user_model_id,
+            plan.job_name,
+            Some(uri),
+        )
+    })
 }
 
 fn command_line(plan: &LaunchPlan, data_dir: &Path, executable: &Path) -> String {
@@ -449,6 +861,7 @@ fn spawn_with_password(
     visible_desktop: bool,
     wait: bool,
     job_name: Option<&str>,
+    _allow_job_fallback: bool,
 ) -> Result<u32> {
     let user_w = wide(username);
     let pass_w = wide(password);
@@ -468,25 +881,40 @@ fn spawn_with_password(
             LOGON32_LOGON_INTERACTIVE,
             LOGON32_PROVIDER_DEFAULT,
             &mut token,
-        )?;
+        )
+        .context("LogonUserW failed for the isolated Windows account")?;
     }
 
     let mut environment: *mut c_void = std::ptr::null_mut();
     let result = unsafe {
-        CreateEnvironmentBlock(&mut environment, token, false)?;
-        let mut corrected_environment = corrected_environment(environment, username);
+        let environment_created = match CreateEnvironmentBlock(&mut environment, token, false) {
+            Ok(()) => true,
+            Err(error) if error.code() == E_ACCESSDENIED => false,
+            Err(error) => {
+                return Err(error).context("CreateEnvironmentBlock failed for the isolated account")
+            }
+        };
+        let mut launch_environment =
+            environment_created.then(|| corrected_environment(environment, username));
         let mut startup = STARTUPINFOW::default();
         startup.cb = std::mem::size_of::<STARTUPINFOW>() as u32;
         if visible_desktop {
             startup.lpDesktop = PWSTR(desktop_w.as_ptr() as *mut u16);
         }
         let job = if let Some(name) = &job_w {
-            Some(CreateJobObjectW(None, PCWSTR(name.as_ptr()))?)
+            Some(
+                CreateJobObjectW(None, PCWSTR(name.as_ptr()))
+                    .context("CreateJobObjectW failed for the isolated instance")?,
+            )
         } else {
             None
         };
+        if let Some(job) = job {
+            grant_job_access(job, username)
+                .context("granting the isolated account access to its Job Object")?;
+        }
         let flags = if job.is_some() {
-            CREATE_UNICODE_ENVIRONMENT | CREATE_SUSPENDED
+            CREATE_UNICODE_ENVIRONMENT | CREATE_SUSPENDED | CREATE_BREAKAWAY_FROM_JOB
         } else {
             CREATE_UNICODE_ENVIRONMENT
         };
@@ -499,7 +927,9 @@ fn spawn_with_password(
             PCWSTR(exe_w.as_ptr()),
             PWSTR(command_w.as_mut_ptr()),
             flags,
-            Some(corrected_environment.as_mut_ptr() as *const c_void),
+            launch_environment
+                .as_mut()
+                .map(|block| block.as_mut_ptr() as *const c_void),
             cwd_w
                 .as_ref()
                 .map(|v| PCWSTR(v.as_ptr()))
@@ -509,8 +939,20 @@ fn spawn_with_password(
         );
         let managed = if created.is_ok() {
             if let Some(job) = job {
-                let result = (|| -> windows::core::Result<()> {
-                    AssignProcessToJobObject(job, process.hProcess)?;
+                let result = (|| -> Result<()> {
+                    let mut inherited_job = BOOL::default();
+                    IsProcessInJob(process.hProcess, None, &mut inherited_job)
+                        .context("IsProcessInJob failed for the alternate-user process")?;
+                    if inherited_job.as_bool() {
+                        if ResumeThread(process.hThread) == u32::MAX {
+                            return Err(windows::core::Error::from_win32()).context(
+                                "ResumeThread failed for the process in its inherited Job Object",
+                            );
+                        }
+                        return Ok(());
+                    }
+                    AssignProcessToJobObject(job, process.hProcess)
+                        .context("AssignProcessToJobObject failed for the isolated instance")?;
                     let mut remote_job = HANDLE::default();
                     DuplicateHandle(
                         GetCurrentProcess(),
@@ -520,9 +962,11 @@ fn spawn_with_password(
                         0,
                         false,
                         DUPLICATE_SAME_ACCESS,
-                    )?;
+                    )
+                    .context("DuplicateHandle failed while retaining the isolated Job Object")?;
                     if ResumeThread(process.hThread) == u32::MAX {
-                        return Err(windows::core::Error::from_win32());
+                        return Err(windows::core::Error::from_win32())
+                            .context("ResumeThread failed for the isolated process");
                     }
                     Ok(())
                 })();
@@ -547,7 +991,9 @@ fn spawn_with_password(
             if !process.hProcess.is_invalid() {
                 let _ = CloseHandle(process.hProcess);
             }
-            let _ = DestroyEnvironmentBlock(environment);
+            if environment_created {
+                let _ = DestroyEnvironmentBlock(environment);
+            }
             let _ = CloseHandle(token);
             return Err(error.into());
         }
@@ -576,10 +1022,12 @@ fn spawn_with_password(
         if !process.hProcess.is_invalid() {
             let _ = CloseHandle(process.hProcess);
         }
-        let _ = DestroyEnvironmentBlock(environment);
+        if environment_created {
+            let _ = DestroyEnvironmentBlock(environment);
+        }
         let _ = CloseHandle(token);
-        created?;
-        Ok::<(u32, bool, Option<u32>), windows::core::Error>((pid, waited, exit_code))
+        created.context("CreateProcessWithLogonW failed for the isolated account")?;
+        Ok::<(u32, bool, Option<u32>), anyhow::Error>((pid, waited, exit_code))
     }?;
     let (pid, waited, exit_code) = result;
     anyhow::ensure!(waited, "alternate-user process timed out after 180 seconds");
@@ -593,7 +1041,7 @@ fn spawn_with_password(
     Ok(pid)
 }
 
-pub fn initialize_known_folders() -> Result<()> {
+fn initialize_known_folders() -> Result<()> {
     use windows::Win32::System::Com::CoTaskMemFree;
     use windows::Win32::UI::Shell::{
         FOLDERID_Cookies, FOLDERID_History, FOLDERID_InternetCache, FOLDERID_LocalAppData,
@@ -615,6 +1063,299 @@ pub fn initialize_known_folders() -> Result<()> {
             CoTaskMemFree(Some(path.0 as *const c_void));
         }
     }
+    let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+    for scheme in ["http", "https", "slack"] {
+        let class = format!(r"Software\Classes\{scheme}");
+        let command = format!(r"{class}\shell\open\command");
+        let managed = hkcu
+            .open_subkey(&command)
+            .ok()
+            .and_then(|key| key.get_value::<String, _>("").ok())
+            .is_some_and(|value| {
+                let value = value.to_ascii_lowercase();
+                value.contains("appmux-profile-init") || value.contains(r"\appmux\tools\")
+            });
+        if managed {
+            let _ = hkcu.delete_subkey_all(&class);
+        }
+    }
+    Ok(())
+}
+
+pub fn initialize_profile(
+    protocol: Option<&str>,
+    helper: Option<&Path>,
+    host: Option<&Path>,
+    hosted_app: Option<&Path>,
+    shim_target: Option<&Path>,
+    profile: Option<&Path>,
+    auth_app: Option<&Path>,
+    status: Option<&Path>,
+    icon: Option<&Path>,
+    app_user_model_id: Option<&str>,
+) -> Result<()> {
+    let options = ProfileInitializationOptions {
+        protocol,
+        helper,
+        host,
+        hosted_app,
+        shim_target,
+        profile,
+        auth_app,
+        status,
+        icon,
+        app_user_model_id,
+    };
+    let Some((protocol, config)) = complete_profile_initialization(options)? else {
+        initialize_known_folders()?;
+        return Ok(());
+    };
+    initialize_known_folders()?;
+    let helper = config.helper;
+    let host = config.host;
+    let hosted_app = config.hosted_app;
+    let shim_target = config.shim_target;
+    let profile = config.profile;
+    let auth_app = config.auth_app;
+    let icon = config.icon;
+    let user_profile = std::env::var_os("USERPROFILE")
+        .map(PathBuf::from)
+        .context("Tier D profile has no USERPROFILE")?;
+    let public_profile = std::env::var_os("PUBLIC")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(r"C:\Users\Public"));
+    validate_profile_protocol_config(protocol, &user_profile, &public_profile, config)?;
+    let hidden_paths = [
+        helper,
+        host,
+        hosted_app,
+        shim_target,
+        profile,
+        auth_app,
+        icon,
+    ];
+    anyhow::ensure!(
+        hidden_paths.into_iter().all(Path::exists),
+        "Tier D authentication files are missing"
+    );
+    let canonical_profile =
+        std::fs::canonicalize(&user_profile).context("resolving the isolated USERPROFILE path")?;
+    for path in hidden_paths {
+        let canonical = std::fs::canonicalize(path)
+            .with_context(|| format!("resolving Tier D authentication path {}", path.display()))?;
+        anyhow::ensure!(
+            canonical.starts_with(&canonical_profile),
+            "Tier D authentication file resolves outside the isolated profile"
+        );
+    }
+    Ok(())
+}
+
+struct BrandWindow {
+    pid: u32,
+    icon: HANDLE,
+}
+
+unsafe extern "system" fn brand_window(
+    hwnd: windows::Win32::Foundation::HWND,
+    lparam: windows::Win32::Foundation::LPARAM,
+) -> windows::Win32::Foundation::BOOL {
+    use windows::Win32::Foundation::{BOOL, LPARAM, WPARAM};
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetWindowThreadProcessId, SendMessageW, WM_SETICON,
+    };
+
+    let state = &*(lparam.0 as *const BrandWindow);
+    let mut pid = 0;
+    GetWindowThreadProcessId(hwnd, Some(&mut pid));
+    if pid == state.pid {
+        SendMessageW(hwnd, WM_SETICON, WPARAM(1), LPARAM(state.icon.0 as isize));
+        SendMessageW(hwnd, WM_SETICON, WPARAM(0), LPARAM(state.icon.0 as isize));
+    }
+    BOOL(1)
+}
+
+pub fn host_electron(
+    host: &Path,
+    app: &Path,
+    shim_target: Option<&Path>,
+    profile: Option<&Path>,
+    auth_app: Option<&Path>,
+    status: Option<&Path>,
+    icon: &Path,
+    app_user_model_id: &str,
+    job_name: Option<&str>,
+    uri: Option<&str>,
+) -> Result<()> {
+    use windows::Win32::Foundation::LPARAM;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        EnumWindows, LoadImageW, IMAGE_ICON, LR_DEFAULTSIZE, LR_LOADFROMFILE,
+    };
+
+    anyhow::ensure!(
+        host.exists()
+            && app.exists()
+            && shim_target.is_none_or(Path::exists)
+            && profile.is_none_or(Path::exists)
+            && auth_app.is_none_or(Path::exists),
+        "Tier C Electron host files are missing"
+    );
+    if let Some(uri) = uri {
+        validate_callback_uri(uri)?;
+    }
+    let held_job = if let Some(name) = job_name {
+        anyhow::ensure!(
+            name.starts_with(r"Local\AppMux.TierC.")
+                && name
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | '\\')),
+            "invalid callback job name"
+        );
+        let name_w = wide(name);
+        Some(unsafe { CreateJobObjectW(None, PCWSTR(name_w.as_ptr()))? })
+    } else {
+        None
+    };
+    std::env::remove_var("ELECTRON_RUN_AS_NODE");
+    let mut command = std::process::Command::new(host);
+    command
+        .arg(app)
+        .arg(format!("--app-user-model-id={app_user_model_id}"))
+        .arg(format!("--icon={}", icon.display()));
+    if let Some(target) = shim_target {
+        command.arg(format!("--shim-target={}", target.display()));
+    }
+    if let Some(profile) = profile {
+        command.arg(format!("--profile={}", profile.display()));
+    }
+    if let Some(auth_app) = auth_app {
+        let helper = std::env::current_exe().context("Tier C helper path is unavailable")?;
+        command.arg(format!("--auth-host={}", host.display()));
+        command.arg(format!("--auth-app={}", auth_app.display()));
+        command.arg(format!("--helper={}", helper.display()));
+    }
+    if let Some(status) = status {
+        command.arg(format!("--status={}", status.display()));
+    }
+    if uri.is_some() {
+        command
+            .arg("--callback-stdin")
+            .stdin(std::process::Stdio::piped());
+    }
+    let mut child = command.spawn()?;
+    if let Some(job) = held_job {
+        use std::os::windows::io::AsRawHandle;
+        if let Err(error) =
+            unsafe { AssignProcessToJobObject(job, HANDLE(child.as_raw_handle() as *mut c_void)) }
+        {
+            let _ = child.kill();
+            let _ = child.wait();
+            unsafe {
+                let _ = CloseHandle(job);
+            }
+            return Err(error).context("assigning hosted Electron to its Job Object");
+        }
+    }
+    if let Some(uri) = uri {
+        let write_result = (|| -> Result<()> {
+            let mut input = child
+                .stdin
+                .take()
+                .context("hosted Electron callback stdin is unavailable")?;
+            input
+                .write_all(uri.as_bytes())
+                .context("writing the callback URI to hosted Electron stdin")?;
+            Ok(())
+        })();
+        if let Err(error) = write_result {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(error);
+        }
+    }
+    let icon_w = wide(&icon.to_string_lossy());
+    let icon = unsafe {
+        LoadImageW(
+            None,
+            PCWSTR(icon_w.as_ptr()),
+            IMAGE_ICON,
+            0,
+            0,
+            LR_LOADFROMFILE | LR_DEFAULTSIZE,
+        )?
+    };
+    let state = BrandWindow {
+        pid: child.id(),
+        icon,
+    };
+    if let Some(job) = held_job {
+        let started = std::time::Instant::now();
+        let mut root_status = None;
+        let mut tree_started = false;
+        loop {
+            unsafe {
+                let _ = EnumWindows(
+                    Some(brand_window),
+                    LPARAM(&state as *const BrandWindow as isize),
+                );
+            }
+            if root_status.is_none() {
+                root_status = child.try_wait()?;
+            }
+            let mut accounting = JOBOBJECT_BASIC_ACCOUNTING_INFORMATION::default();
+            unsafe {
+                QueryInformationJobObject(
+                    job,
+                    JobObjectBasicAccountingInformation,
+                    &mut accounting as *mut _ as *mut c_void,
+                    std::mem::size_of_val(&accounting) as u32,
+                    None,
+                )?;
+            }
+            if accounting.ActiveProcesses > 2
+                || accounting.ActiveProcesses > 1
+                    && started.elapsed() >= std::time::Duration::from_secs(3)
+            {
+                tree_started = true;
+            }
+            if accounting.ActiveProcesses <= 1 {
+                unsafe {
+                    let _ = CloseHandle(job);
+                }
+                if tree_started {
+                    return Ok(());
+                }
+                let status = root_status.or_else(|| child.try_wait().ok().flatten());
+                anyhow::ensure!(
+                    status.is_some_and(|status| status.success()),
+                    "hosted Electron process exited before its process tree started"
+                );
+                return Ok(());
+            }
+            std::thread::sleep(std::time::Duration::from_millis(500));
+        }
+    }
+    for _ in 0..240 {
+        unsafe {
+            let _ = EnumWindows(
+                Some(brand_window),
+                LPARAM(&state as *const BrandWindow as isize),
+            );
+        }
+        if let Some(status) = child.try_wait()? {
+            anyhow::ensure!(
+                status.success(),
+                "hosted Electron process exited with {status}"
+            );
+            return Ok(());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(500));
+    }
+    let status = child.wait()?;
+    anyhow::ensure!(
+        status.success(),
+        "hosted Electron process exited with {status}"
+    );
     Ok(())
 }
 
@@ -695,7 +1436,10 @@ fn copy_install_tree(source: &Path, destination: &Path) -> Result<()> {
     let mut app_dirs: Vec<_> = std::fs::read_dir(source)?
         .filter_map(Result::ok)
         .filter(|entry| {
-            entry.file_type().map(|kind| kind.is_dir()).unwrap_or(false)
+            entry
+                .file_type()
+                .map(|kind| kind.is_dir() && !kind.is_symlink())
+                .unwrap_or(false)
                 && entry
                     .file_name()
                     .to_string_lossy()
@@ -708,6 +1452,14 @@ fn copy_install_tree(source: &Path, destination: &Path) -> Result<()> {
     let newest_app = app_dirs.last().cloned();
     for entry in std::fs::read_dir(source)? {
         let entry = entry?;
+        let kind = entry.file_type()?;
+        use std::os::windows::fs::MetadataExt;
+        let attributes = std::fs::symlink_metadata(entry.path())?.file_attributes();
+        anyhow::ensure!(
+            !kind.is_symlink() && attributes & 0x400 == 0,
+            "refusing reparse point in managed-copy source: {}",
+            entry.path().display()
+        );
         let name = entry.file_name();
         let lower = name.to_string_lossy().to_ascii_lowercase();
         if lower == "packages" || (lower.starts_with("app-") && newest_app.as_ref() != Some(&name))
@@ -715,7 +1467,7 @@ fn copy_install_tree(source: &Path, destination: &Path) -> Result<()> {
             continue;
         }
         let target = destination.join(&name);
-        if entry.file_type()?.is_dir() {
+        if kind.is_dir() {
             copy_install_tree(&entry.path(), &target)?;
         } else {
             let copy = std::fs::metadata(&target)
@@ -853,6 +1605,182 @@ fn grant_modify(path: &Path, username: &str) -> Result<()> {
     Ok(())
 }
 
+fn patch_slack_electron_fuse(bytes: &mut [u8]) -> Result<bool> {
+    let sentinels: Vec<_> = bytes
+        .windows(ELECTRON_FUSE_SENTINEL.len())
+        .enumerate()
+        .filter_map(|(index, value)| (value == ELECTRON_FUSE_SENTINEL).then_some(index))
+        .collect();
+    anyhow::ensure!(
+        sentinels.len() == 1,
+        "Slack Tier D Electron fuse sentinel mismatch"
+    );
+    let header = sentinels[0] + ELECTRON_FUSE_SENTINEL.len();
+    let fuses = bytes
+        .get_mut(header..header + SLACK_451191_FUSES.len())
+        .context("Slack Tier D Electron fuse block is truncated")?;
+    if fuses == SLACK_451191_PATCHED_FUSES {
+        return Ok(false);
+    }
+    anyhow::ensure!(
+        fuses == SLACK_451191_FUSES,
+        "Slack Tier D Electron fuse layout mismatch"
+    );
+    fuses.copy_from_slice(SLACK_451191_PATCHED_FUSES);
+    Ok(true)
+}
+
+fn slack_singleton_replacement() -> Vec<u8> {
+    let mut replacement = b"true".to_vec();
+    replacement.resize(SLACK_451191_SINGLETON.len(), b' ');
+    replacement
+}
+
+fn patch_slack_singleton(bytes: &mut [u8]) -> Result<bool> {
+    let replacement = slack_singleton_replacement();
+    let originals: Vec<_> = bytes
+        .windows(SLACK_451191_SINGLETON.len())
+        .enumerate()
+        .filter_map(|(index, value)| (value == SLACK_451191_SINGLETON).then_some(index))
+        .collect();
+    let patched: Vec<_> = bytes
+        .windows(replacement.len())
+        .enumerate()
+        .filter_map(|(index, value)| (value == replacement).then_some(index))
+        .collect();
+    match (originals.as_slice(), patched.as_slice()) {
+        ([index], []) => {
+            bytes[*index..*index + replacement.len()].copy_from_slice(&replacement);
+            Ok(true)
+        }
+        ([], [_]) => Ok(false),
+        _ => bail!("Slack Tier D singleton signature mismatch; refusing to patch copied archive"),
+    }
+}
+
+fn patch_slack_open_external(bytes: &mut [u8]) -> Result<bool> {
+    anyhow::ensure!(
+        SLACK_451191_OPEN_EXTERNAL.len() == SLACK_451191_APPMUX_OPEN_EXTERNAL.len(),
+        "Slack Tier D external-link replacement length mismatch"
+    );
+    let originals: Vec<_> = bytes
+        .windows(SLACK_451191_OPEN_EXTERNAL.len())
+        .enumerate()
+        .filter_map(|(index, value)| (value == SLACK_451191_OPEN_EXTERNAL).then_some(index))
+        .collect();
+    let patched: Vec<_> = bytes
+        .windows(SLACK_451191_APPMUX_OPEN_EXTERNAL.len())
+        .enumerate()
+        .filter_map(|(index, value)| (value == SLACK_451191_APPMUX_OPEN_EXTERNAL).then_some(index))
+        .collect();
+    match (originals.as_slice(), patched.as_slice()) {
+        ([index], []) => {
+            bytes[*index..*index + SLACK_451191_APPMUX_OPEN_EXTERNAL.len()]
+                .copy_from_slice(SLACK_451191_APPMUX_OPEN_EXTERNAL);
+            Ok(true)
+        }
+        ([], [_]) => Ok(false),
+        _ => {
+            bail!("Slack Tier D external-link signature mismatch; refusing to patch copied archive")
+        }
+    }
+}
+
+fn patch_slack_open_external_selector(bytes: &mut [u8]) -> Result<bool> {
+    anyhow::ensure!(
+        SLACK_451191_OPEN_EXTERNAL_SELECTOR.len() == SLACK_451191_APPMUX_SELECTOR.len(),
+        "Slack Tier D external-link selector replacement length mismatch"
+    );
+    let originals: Vec<_> = bytes
+        .windows(SLACK_451191_OPEN_EXTERNAL_SELECTOR.len())
+        .enumerate()
+        .filter_map(|(index, value)| {
+            (value == SLACK_451191_OPEN_EXTERNAL_SELECTOR).then_some(index)
+        })
+        .collect();
+    let patched: Vec<_> = bytes
+        .windows(SLACK_451191_APPMUX_SELECTOR.len())
+        .enumerate()
+        .filter_map(|(index, value)| (value == SLACK_451191_APPMUX_SELECTOR).then_some(index))
+        .collect();
+    match (originals.as_slice(), patched.as_slice()) {
+        ([index], []) => {
+            bytes[*index..*index + SLACK_451191_APPMUX_SELECTOR.len()]
+                .copy_from_slice(SLACK_451191_APPMUX_SELECTOR);
+            Ok(true)
+        }
+        ([], [_]) => Ok(false),
+        _ => bail!(
+            "Slack Tier D external-link selector signature mismatch; refusing to patch copied archive"
+        ),
+    }
+}
+
+pub fn preflight_tier_d(plan: &LaunchPlan) -> Result<()> {
+    let Some(adapter) = plan.recipe.tier_d_patch.as_deref() else {
+        return Ok(());
+    };
+    anyhow::ensure!(adapter == "slack-singleton-v1", "unknown Tier D adapter");
+    anyhow::ensure!(
+        sha256_file(&plan.exe)?.eq_ignore_ascii_case(SLACK_451191_EXE_SHA256),
+        "Slack adapter update required: executable hash is not supported"
+    );
+    let source_asar = plan
+        .exe
+        .parent()
+        .context("Slack executable has no parent")?
+        .join("resources")
+        .join("app.asar");
+    anyhow::ensure!(
+        sha256_file(&source_asar)?.eq_ignore_ascii_case(SLACK_451191_ASAR_SHA256),
+        "Slack adapter update required: app.asar hash is not supported"
+    );
+    let mut executable = std::fs::read(&plan.exe)?;
+    patch_slack_electron_fuse(&mut executable)?;
+    let mut archive = std::fs::read(source_asar)?;
+    patch_slack_singleton(&mut archive)?;
+    patch_slack_open_external(&mut archive)?;
+    patch_slack_open_external_selector(&mut archive)?;
+    Ok(())
+}
+
+fn apply_tier_d_patch(
+    staged: &Instance,
+    plan: &LaunchPlan,
+    source_root: &Path,
+    destination_root: &Path,
+) -> Result<()> {
+    let Some(patch) = plan.recipe.tier_d_patch.as_deref() else {
+        return Ok(());
+    };
+    anyhow::ensure!(patch == "slack-singleton-v1", "unknown Tier D patch");
+    preflight_tier_d(plan)?;
+    let target_exe = staged_executable(staged, plan)?.context("Tier D app is not mirrored")?;
+    let relative_exe = target_exe.strip_prefix(destination_root)?;
+    let source_exe = source_root.join(relative_exe);
+    std::fs::copy(&source_exe, &target_exe)?;
+    let mut executable_bytes = std::fs::read(&target_exe)?;
+    patch_slack_electron_fuse(&mut executable_bytes)?;
+    std::fs::write(&target_exe, executable_bytes)?;
+    let source_asar = source_exe
+        .parent()
+        .context("Tier D source executable has no parent")?
+        .join("resources")
+        .join("app.asar");
+    let destination_asar = target_exe
+        .parent()
+        .context("Tier D executable has no parent")?
+        .join("resources")
+        .join("app.asar");
+    std::fs::copy(&source_asar, &destination_asar)?;
+    let mut bytes = std::fs::read(&destination_asar)?;
+    patch_slack_singleton(&mut bytes)?;
+    patch_slack_open_external(&mut bytes)?;
+    patch_slack_open_external_selector(&mut bytes)?;
+    std::fs::write(&destination_asar, bytes)?;
+    Ok(())
+}
+
 pub fn stage_per_user_app(inst: &Instance, plan: &LaunchPlan, username: &str) -> Result<()> {
     let source = per_user_install_root(&plan.exe);
     let Some(source) = source else {
@@ -868,6 +1796,7 @@ pub fn stage_per_user_app(inst: &Instance, plan: &LaunchPlan, username: &str) ->
         )
     })?;
     grant_modify(&destination, username)?;
+    apply_tier_d_patch(&staged, plan, &source, &destination)?;
     if let Some(version) = plan.recipe.tier_c_electron_host.as_deref() {
         let archive_sha256 = plan
             .recipe
@@ -889,6 +1818,32 @@ pub fn stage_per_user_app(inst: &Instance, plan: &LaunchPlan, username: &str) ->
         copy_install_tree(&host_source, &host_destination)?;
         verify_electron_executable(&host_destination.join("electron.exe"), executable_sha256)?;
         grant_modify(&host_destination, username)?;
+        let auth_app = profile_root(username)
+            .join("AppData")
+            .join("Local")
+            .join("AppMux")
+            .join("Tools")
+            .join("AuthBrowser");
+        std::fs::create_dir_all(&auth_app)?;
+        std::fs::write(
+            auth_app.join("package.json"),
+            r#"{"name":"appmux-auth-browser","version":"1.0.0","main":"main.js"}"#,
+        )?;
+        std::fs::write(auth_app.join("main.js"), include_str!("tier_d_auth.js"))?;
+        grant_modify(&auth_app, username)?;
+        let shim_app = profile_root(username)
+            .join("AppData")
+            .join("Local")
+            .join("AppMux")
+            .join("Tools")
+            .join("SlackCompatibilityShim");
+        std::fs::create_dir_all(&shim_app)?;
+        std::fs::write(
+            shim_app.join("package.json"),
+            r#"{"name":"appmux-slack-compatibility","version":"1.0.0","main":"main.js"}"#,
+        )?;
+        std::fs::write(shim_app.join("main.js"), include_str!("tier_d_shim.js"))?;
+        grant_modify(&shim_app, username)?;
     }
     if let Some(name) = plan.recipe.tier_c_user_data_dir.as_deref() {
         anyhow::ensure!(
@@ -980,7 +1935,10 @@ fn staged_executable(inst: &Instance, plan: &LaunchPlan) -> Result<Option<PathBu
     let mut versions: Vec<_> = std::fs::read_dir(&source)?
         .filter_map(Result::ok)
         .filter(|entry| {
-            entry.file_type().map(|kind| kind.is_dir()).unwrap_or(false)
+            entry
+                .file_type()
+                .map(|kind| kind.is_dir() && !kind.is_symlink())
+                .unwrap_or(false)
                 && entry
                     .file_name()
                     .to_string_lossy()
@@ -1012,6 +1970,81 @@ fn staged_executable(inst: &Instance, plan: &LaunchPlan) -> Result<Option<PathBu
     Ok(Some(candidate))
 }
 
+struct ElectronHostConfig {
+    helper: PathBuf,
+    host: PathBuf,
+    app: PathBuf,
+    icon: PathBuf,
+    auth_app: PathBuf,
+    shim_app: PathBuf,
+    user_data: PathBuf,
+    app_user_model_id: String,
+}
+
+fn electron_host_config(
+    inst: &Instance,
+    plan: &LaunchPlan,
+    username: &str,
+) -> Result<ElectronHostConfig> {
+    let version = plan
+        .recipe
+        .tier_c_electron_host
+        .as_deref()
+        .context("recipe has no alternate Electron host")?;
+    let staged = staged_executable(inst, plan)?.context("app is not mirrored")?;
+    let install_root = staged
+        .parent()
+        .and_then(Path::parent)
+        .context("mirrored Electron application has no install root")?;
+    let user_data_name = plan
+        .recipe
+        .tier_c_user_data_dir
+        .as_deref()
+        .context("recipe has no Tier C user-data directory")?;
+    Ok(ElectronHostConfig {
+        helper: profile_root(username)
+            .join("AppData")
+            .join("Local")
+            .join("AppMux")
+            .join("Tools")
+            .join("appmux-profile-init.exe"),
+        host: profile_root(username)
+            .join("AppData")
+            .join("Local")
+            .join("AppMux")
+            .join("Tools")
+            .join(format!("Electron-{version}"))
+            .join("electron.exe"),
+        app: staged
+            .parent()
+            .context("mirrored Electron app has no parent")?
+            .join("resources")
+            .join("app.asar"),
+        icon: install_root.join("app.ico"),
+        auth_app: profile_root(username)
+            .join("AppData")
+            .join("Local")
+            .join("AppMux")
+            .join("Tools")
+            .join("AuthBrowser"),
+        shim_app: profile_root(username)
+            .join("AppData")
+            .join("Local")
+            .join("AppMux")
+            .join("Tools")
+            .join("SlackCompatibilityShim"),
+        user_data: profile_root(username)
+            .join("AppData")
+            .join("Roaming")
+            .join(user_data_name),
+        app_user_model_id: format!(
+            "AppMux.{}.{}",
+            crate::paths::sanitize(&inst.app_id),
+            account_name(&inst.app_id, &inst.name)
+        ),
+    })
+}
+
 fn stop_image(inst: &Instance, image: &str) -> Result<()> {
     let username = inst
         .windows_user
@@ -1041,24 +2074,50 @@ fn stop_image(inst: &Instance, image: &str) -> Result<()> {
         false,
         true,
         None,
+        false,
     )?;
     Ok(())
 }
 
-pub fn stop(inst: &Instance, plan: &LaunchPlan) -> Result<()> {
+fn terminate_instance_job(inst: &Instance) -> Result<bool> {
     let job_name = format!(
         r"Local\AppMux.TierC.{}",
         account_name(&inst.app_id, &inst.name)
     );
     let job_w = wide(&job_name);
-    if let Ok(job) = unsafe { OpenJobObjectW(JOB_OBJECT_TERMINATE, false, PCWSTR(job_w.as_ptr())) }
-    {
-        let result = unsafe { TerminateJobObject(job, 0) };
+    let job = match unsafe { OpenJobObjectW(JOB_OBJECT_TERMINATE, false, PCWSTR(job_w.as_ptr())) } {
+        Ok(job) => job,
+        Err(error) if error.code().0 as u32 == 0x8007_0002 => return Ok(false),
+        Err(error) => return Err(error).context("opening the named job for the isolated instance"),
+    };
+    let mut accounting = JOBOBJECT_BASIC_ACCOUNTING_INFORMATION::default();
+    let query = unsafe {
+        QueryInformationJobObject(
+            job,
+            JobObjectBasicAccountingInformation,
+            &mut accounting as *mut _ as *mut c_void,
+            std::mem::size_of_val(&accounting) as u32,
+            None,
+        )
+    };
+    if query.is_err() || accounting.ActiveProcesses == 0 {
         unsafe {
             let _ = CloseHandle(job);
         }
-        result?;
-        std::thread::sleep(std::time::Duration::from_secs(2));
+        query?;
+        return Ok(false);
+    }
+    let result = unsafe { TerminateJobObject(job, 0) };
+    unsafe {
+        let _ = CloseHandle(job);
+    }
+    result?;
+    std::thread::sleep(std::time::Duration::from_secs(2));
+    Ok(true)
+}
+
+pub fn stop(inst: &Instance, plan: &LaunchPlan) -> Result<()> {
+    if terminate_instance_job(inst)? {
         return Ok(());
     }
     anyhow::ensure!(
@@ -1079,31 +2138,38 @@ pub fn launch(inst: &Instance, plan: &LaunchPlan) -> Result<u32> {
         .windows_user
         .as_deref()
         .context("Tier C instance has no Windows account; provision it first")?;
+    grant_interactive_desktop(username).context(
+        "refreshing interactive desktop access; run Tier C preparation with administrator approval",
+    )?;
     let encrypted = std::fs::read(credential_path(inst))
         .context("Tier C credential is missing; provision the instance again")?;
     let password = unprotect(&encrypted)?;
     let staged = staged_executable(inst, plan)?;
-    let (executable, command) = if let Some(version) = plan.recipe.tier_c_electron_host.as_deref() {
-        let host = profile_root(username)
-            .join("AppData")
-            .join("Local")
-            .join("AppMux")
-            .join("Tools")
-            .join(format!("Electron-{version}"))
-            .join("electron.exe");
-        let app = staged
-            .as_deref()
-            .and_then(Path::parent)
-            .context("mirrored Electron application has no parent directory")?
-            .join("resources")
-            .join("app.asar");
+    let job = format!(
+        r"Local\AppMux.TierC.{}",
+        account_name(&inst.app_id, &inst.name)
+    );
+    let (executable, command) = if plan.recipe.tier_c_electron_host.is_some() {
+        let config = electron_host_config(inst, plan, username)?;
+        let public = std::env::var_os("PUBLIC")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(r"C:\Users\Public"));
+        let status = public
+            .join("Documents")
+            .join(format!("AppMux-Auth-{username}.json"));
         let command = format!(
-            "{} {} --resourcePath={}",
-            quote_arg(&host.to_string_lossy()),
-            quote_arg(&app.to_string_lossy()),
-            quote_arg(&app.to_string_lossy())
+            "{} tier-c host-electron --host {} --hosted-app {} --shim-target {} --profile {} --auth-app {} --status {} --icon {} --app-user-model-id {}",
+            quote_arg(&config.helper.to_string_lossy()),
+            quote_arg(&config.host.to_string_lossy()),
+            quote_arg(&config.shim_app.to_string_lossy()),
+            quote_arg(&config.app.to_string_lossy()),
+            quote_arg(&config.user_data.to_string_lossy()),
+            quote_arg(&config.auth_app.to_string_lossy()),
+            quote_arg(&status.to_string_lossy()),
+            quote_arg(&config.icon.to_string_lossy()),
+            quote_arg(&config.app_user_model_id)
         );
-        (host, command)
+        (config.helper, command)
     } else {
         let executable = staged.clone().unwrap_or_else(|| plan.exe.clone());
         let command = command_line(plan, &data_dir(inst)?, &executable);
@@ -1117,10 +2183,6 @@ pub fn launch(inst: &Instance, plan: &LaunchPlan) -> Result<u32> {
             .filter(|p| p.exists())
             .or_else(|| plan.exe.parent())
     };
-    let job = format!(
-        r"Local\AppMux.TierC.{}",
-        account_name(&inst.app_id, &inst.name)
-    );
     spawn_with_password(
         username,
         &password,
@@ -1130,6 +2192,7 @@ pub fn launch(inst: &Instance, plan: &LaunchPlan) -> Result<u32> {
         true,
         false,
         Some(&job),
+        false,
     )
 }
 
@@ -1172,5 +2235,319 @@ mod tests {
         assert_eq!(quote_arg("plain"), "plain");
         assert_eq!(quote_arg("has space"), "\"has space\"");
         assert_eq!(quote_arg(r#"a"b"#), r#""a\"b""#);
+    }
+
+    #[test]
+    fn profile_initialization_options_are_fail_closed() {
+        assert!(
+            complete_profile_initialization(ProfileInitializationOptions::default())
+                .unwrap()
+                .is_none()
+        );
+
+        let partial = ProfileInitializationOptions {
+            protocol: Some("private-protocol-value"),
+            helper: Some(Path::new(r"C:\Users\hidden\private-helper-value.exe")),
+            ..ProfileInitializationOptions::default()
+        };
+        let error = complete_profile_initialization(partial)
+            .unwrap_err()
+            .to_string();
+        assert_eq!(
+            error,
+            "incomplete Tier D profile configuration; missing: host, hosted-app, shim-target, profile, auth-app, status, icon, app-user-model-id"
+        );
+        assert!(!error.contains("private-protocol-value"));
+        assert!(!error.contains("private-helper-value"));
+
+        let user_profile = Path::new(r"C:\Users\hidden account");
+        let public_profile = Path::new(r"C:\Users\Public");
+        let helper = user_profile.join(r"AppData\Local\AppMux\Tools\appmux-profile-init.exe");
+        let host = user_profile.join(r"AppData\Local\AppMux\Tools\Electron-43\electron.exe");
+        let hosted_app = user_profile.join(r"AppData\Local\AppMux\Tools\SlackCompatibilityShim");
+        let shim_target = user_profile.join(r"AppData\Local\slack\app-4.51\resources\app.asar");
+        let profile = user_profile.join(r"AppData\Roaming\Slack");
+        let auth_app = user_profile.join(r"AppData\Local\AppMux\Tools\AuthBrowser");
+        let status = public_profile.join(r"Documents\AppMux-Auth-hidden account.json");
+        let icon = user_profile.join(r"AppData\Local\slack\app.ico");
+        let (protocol, config) = complete_profile_initialization(ProfileInitializationOptions {
+            protocol: Some("slack"),
+            helper: Some(&helper),
+            host: Some(&host),
+            hosted_app: Some(&hosted_app),
+            shim_target: Some(&shim_target),
+            profile: Some(&profile),
+            auth_app: Some(&auth_app),
+            status: Some(&status),
+            icon: Some(&icon),
+            app_user_model_id: Some("AppMux.slack.hidden"),
+        })
+        .unwrap()
+        .unwrap();
+        validate_profile_protocol_config(protocol, user_profile, public_profile, config).unwrap();
+    }
+
+    #[test]
+    fn deferred_host_reads_one_private_callback_and_passes_it_only_to_direct_launch() {
+        let user_profile = Path::new(r"C:\Users\hidden");
+        let public_profile = Path::new(r"C:\Users\Public");
+        let helper = user_profile.join(r"AppData\Local\AppMux\Tools\appmux-profile-init.exe");
+        let host = user_profile.join(r"AppData\Local\AppMux\Tools\Electron-43\electron.exe");
+        let hosted_app = user_profile.join(r"AppData\Local\AppMux\Tools\SlackCompatibilityShim");
+        let shim_target = user_profile.join(r"AppData\Local\slack\resources\app.asar");
+        let profile = user_profile.join(r"AppData\Roaming\Slack");
+        let auth_app = user_profile.join(r"AppData\Local\AppMux\Tools\AuthBrowser");
+        let status = public_profile.join(r"Documents\AppMux-Auth-hidden.json");
+        let icon = user_profile.join(r"AppData\Local\slack\app.ico");
+        let plan = DeferredHostElectronPlan {
+            wait_pid: 200,
+            helper: &helper,
+            host: &host,
+            hosted_app: &hosted_app,
+            shim_target: &shim_target,
+            profile: &profile,
+            auth_app: &auth_app,
+            status: &status,
+            icon: &icon,
+            app_user_model_id: "AppMux.slack.hidden",
+            job_name: Some(r"Local\AppMux.TierC.hidden"),
+        };
+        let callback = "slack://callback?test=1";
+        let mut input = std::io::Cursor::new(callback.as_bytes());
+        let prepared =
+            prepare_deferred_host_launch(&mut input, plan, 100, user_profile, public_profile)
+                .unwrap();
+        assert!(!format!("{:?}", prepared.plan).contains(callback));
+        let mut launched_uri = None;
+        launch_prepared_deferred_host(&prepared, |launched_plan, uri| {
+            assert_eq!(launched_plan.host, host);
+            launched_uri = Some(uri.to_string());
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(launched_uri.as_deref(), Some(callback));
+
+        let mut oversize = std::io::Cursor::new(vec![b'a'; MAX_DEFERRED_PROTOCOL_URI_LEN + 1]);
+        assert!(read_callback_uri(&mut oversize).is_err());
+        for invalid in [
+            b"https://example.invalid/callback".as_slice(),
+            b"Slack://callback?test=1".as_slice(),
+            b"slack:".as_slice(),
+            b"slack://callback\n?test=1".as_slice(),
+            &[0xff, 0xfe],
+        ] {
+            assert!(read_callback_uri(&mut std::io::Cursor::new(invalid)).is_err());
+        }
+        assert!(validate_wait_pid(0, 100).is_err());
+        assert!(validate_wait_pid(100, 100).is_err());
+        assert!(validate_wait_pid(200, 100).is_ok());
+        assert!((1_000..=120_000).contains(&DEFERRED_PROTOCOL_WAIT_MS));
+    }
+
+    #[test]
+    fn slack_tier_d_patch_is_exact_idempotent_and_fail_closed() {
+        let mut executable = [
+            b"prefix".as_slice(),
+            ELECTRON_FUSE_SENTINEL,
+            SLACK_451191_FUSES,
+            b"suffix".as_slice(),
+        ]
+        .concat();
+        assert!(patch_slack_electron_fuse(&mut executable).unwrap());
+        assert!(!patch_slack_electron_fuse(&mut executable).unwrap());
+        assert!(executable
+            .windows(SLACK_451191_PATCHED_FUSES.len())
+            .any(|value| value == SLACK_451191_PATCHED_FUSES));
+
+        let mut archive = [
+            b"before".as_slice(),
+            SLACK_451191_SINGLETON,
+            b"after".as_slice(),
+        ]
+        .concat();
+        assert!(patch_slack_singleton(&mut archive).unwrap());
+        let once = archive.clone();
+        assert!(!patch_slack_singleton(&mut archive).unwrap());
+        assert_eq!(archive, once);
+        assert_eq!(
+            archive.len(),
+            b"before".len() + SLACK_451191_SINGLETON.len() + b"after".len()
+        );
+
+        let mut external = [
+            b"before".as_slice(),
+            SLACK_451191_OPEN_EXTERNAL,
+            b"after".as_slice(),
+        ]
+        .concat();
+        assert!(patch_slack_open_external(&mut external).unwrap());
+        let external_once = external.clone();
+        assert!(!patch_slack_open_external(&mut external).unwrap());
+        assert_eq!(external, external_once);
+        assert!(external
+            .windows(SLACK_451191_APPMUX_OPEN_EXTERNAL.len())
+            .any(|value| value == SLACK_451191_APPMUX_OPEN_EXTERNAL));
+
+        let mut selector = [
+            b"before".as_slice(),
+            SLACK_451191_OPEN_EXTERNAL_SELECTOR,
+            b"after".as_slice(),
+        ]
+        .concat();
+        assert!(patch_slack_open_external_selector(&mut selector).unwrap());
+        let selector_once = selector.clone();
+        assert!(!patch_slack_open_external_selector(&mut selector).unwrap());
+        assert_eq!(selector, selector_once);
+
+        let mut duplicate = [SLACK_451191_SINGLETON, SLACK_451191_SINGLETON].concat();
+        assert!(patch_slack_singleton(&mut duplicate).is_err());
+        let mut duplicate_external =
+            [SLACK_451191_OPEN_EXTERNAL, SLACK_451191_OPEN_EXTERNAL].concat();
+        assert!(patch_slack_open_external(&mut duplicate_external).is_err());
+        let mut duplicate_selector = [
+            SLACK_451191_OPEN_EXTERNAL_SELECTOR,
+            SLACK_451191_OPEN_EXTERNAL_SELECTOR,
+        ]
+        .concat();
+        assert!(patch_slack_open_external_selector(&mut duplicate_selector).is_err());
+        let mut unknown = [
+            b"prefix".as_slice(),
+            ELECTRON_FUSE_SENTINEL,
+            b"\x01\x09?????????".as_slice(),
+        ]
+        .concat();
+        assert!(patch_slack_electron_fuse(&mut unknown).is_err());
+        assert_eq!(SLACK_451191_EXE_SHA256.len(), 64);
+        assert_eq!(SLACK_451191_ASAR_SHA256.len(), 64);
+    }
+
+    #[test]
+    fn auth_script_routes_callback_only_to_the_existing_private_pipe() {
+        let script = include_str!("tier_d_auth.js");
+        assert!(script.contains("const callbackPipe = value('callback-pipe')"));
+        assert!(script.contains("sendToExistingSlack(target).then("));
+        assert!(script.contains("frame.writeUInt32LE(payload.length, 0)"));
+        assert!(script.contains("report('callback-pipe-sent')"));
+        assert!(script.contains("report('callback-pipe-error'"));
+        for forbidden in [
+            "'defer-host-electron'",
+            "spawn(helper",
+            "`--uri=${target}`",
+            "`--callback-uri=${target}`",
+            "shell.openExternal(target)",
+            "report(target",
+            "env: {",
+        ] {
+            assert!(!script.contains(forbidden));
+        }
+    }
+
+    #[test]
+    fn shim_callback_is_single_flight_and_dispatches_second_instance_without_persisting_uri() {
+        let script = include_str!("tier_d_shim.js");
+        assert!(script.contains("const CALLBACK_LOCK_NAME = '.appmux-callback.lock'"));
+        assert!(script.contains("path.resolve(resolvedProfile, CALLBACK_LOCK_NAME)"));
+        assert!(script.contains("fs.openSync(callbackLockPath, 'wx')"));
+        assert!(script.contains("CALLBACK_LOCK_STALE_MS"));
+        assert!(script.contains("callbackLockTimer = setTimeout"));
+        assert!(script.contains("report('callback-duplicate')"));
+        assert!(script.contains("process.exit(0)"));
+        assert!(script.contains("process.argv = [process.execPath]"));
+        assert!(!script.contains("process.argv.push(callback)"));
+        assert!(script.contains("process.argv.includes('--callback-stdin')"));
+        assert!(script.contains("fs.readSync(0, input"));
+        assert!(!script.contains("value('callback-uri')"));
+        assert!(script.contains("electron.app.listenerCount('second-instance') === 0"));
+        assert!(script.contains("error.code = 'LISTENER_TIMEOUT'"));
+        assert!(script.contains("setTimeout(dispatch, 50)"));
+        assert!(script.contains(
+            "electron.app.emit('second-instance', {}, [process.execPath, candidate], process.cwd(), {})"
+        ));
+        assert!(script.contains("global.appmuxOpen = hookedOpenExternal"));
+        assert!(script.contains("crypto.randomBytes(24)"));
+        assert!(script.contains("electron.app.setAsDefaultProtocolClient = () => true"));
+        assert!(script.contains("net.createServer(socket =>"));
+        assert!(script.contains("input.readUInt32LE(0)"));
+        assert!(script.contains("report('callback-pipe-listening')"));
+        assert!(script.contains("'callback-pipe-dispatched'"));
+        assert!(script.contains("'callback-dispatched'"));
+        let lock = script.find("if (!acquireCallbackLock())").unwrap();
+        let require = script.find("require(target)").unwrap();
+        let wait = script
+            .find("electron.app.listenerCount('second-instance')")
+            .unwrap();
+        assert!(lock < require, "callback lock must precede loading Slack");
+        assert!(
+            require < wait,
+            "Slack must load before waiting for its callback listener"
+        );
+        for forbidden in [
+            "console.log",
+            "console.error",
+            "report(callback",
+            "JSON.stringify(callback",
+            "writeFileSync(callback",
+            "appendFileSync(callback",
+        ] {
+            assert!(
+                !script.contains(forbidden),
+                "found sensitive sink: {forbidden}"
+            );
+        }
+    }
+
+    #[test]
+    fn profile_protocol_config_rejects_unsupported_protocols_and_path_misuse() {
+        let user_profile = Path::new(r"C:\Users\hidden");
+        let public_profile = Path::new(r"C:\Users\Public");
+        let helper = user_profile.join(r"AppData\Local\AppMux\Tools\appmux-profile-init.exe");
+        let host = user_profile.join(r"AppData\Local\AppMux\Tools\Electron-43\electron.exe");
+        let hosted_app = user_profile.join(r"AppData\Local\AppMux\Tools\SlackCompatibilityShim");
+        let shim_target = user_profile.join(r"AppData\Local\slack\resources\app.asar");
+        let profile = user_profile.join(r"AppData\Roaming\Slack");
+        let auth_app = user_profile.join(r"AppData\Local\AppMux\Tools\AuthBrowser");
+        let status = public_profile.join(r"Documents\AppMux-Auth-hidden.json");
+        let icon = user_profile.join(r"AppData\Local\slack\app.ico");
+        let config = ElectronHostCommandConfig {
+            helper: &helper,
+            host: &host,
+            hosted_app: &hosted_app,
+            shim_target: &shim_target,
+            profile: &profile,
+            auth_app: &auth_app,
+            status: &status,
+            icon: &icon,
+            app_user_model_id: "AppMux.slack.hidden",
+        };
+
+        assert!(validate_profile_protocol_config(
+            "unsupported",
+            user_profile,
+            public_profile,
+            config
+        )
+        .is_err());
+        let outside = Path::new(r"C:\Users\owner\resources\app.asar");
+        assert!(validate_profile_protocol_config(
+            "slack",
+            user_profile,
+            public_profile,
+            ElectronHostCommandConfig {
+                shim_target: outside,
+                ..config
+            }
+        )
+        .is_err());
+        let traversal = user_profile.join(r"AppData\Local\..\..\owner\app.asar");
+        assert!(validate_profile_protocol_config(
+            "slack",
+            user_profile,
+            public_profile,
+            ElectronHostCommandConfig {
+                shim_target: &traversal,
+                ..config
+            }
+        )
+        .is_err());
     }
 }

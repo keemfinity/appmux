@@ -39,6 +39,7 @@ public partial class NewInstanceWindow
                     "recipe-a" => "native app profile flags",
                     "recipe-b" => "verified environment profile",
                     "tier-c" => "strong Windows-user isolation (UAC)",
+                    "tier-d" => "version-gated Compatibility Shim (UAC)",
                     "web-app" => "isolated official web app",
                     "package-lab" => "separate signed package identity",
                     "package-lab-service-free" => "service-free package identity",
@@ -90,7 +91,7 @@ public partial class NewInstanceWindow
             await CreateWebInstance(name);
             return;
         }
-        if (_analysis?.Route == "tier-c")
+        if (_analysis?.Route is "tier-c" or "tier-d")
         {
             await CreateTierCInstance(name);
             return;
@@ -147,17 +148,23 @@ public partial class NewInstanceWindow
     private async Task CreateTierCInstance(string name)
     {
         if (_analysis is null) return;
+        var tierD = _analysis.Route == "tier-d";
         var warning = new Wpf.Ui.Controls.MessageBox
         {
-            Title = "Native isolation requires a Windows profile",
-            Content = "This app needs one hidden standard local account for a genuine separate " +
-                      "Windows profile. " +
-                      "If the app is installed only for your account, AppMux mirrors a private " +
-                      "runnable copy into that isolated profile. Some Electron apps also require a " +
-                      "matching official Electron runtime, downloaded with a pinned SHA-256. Windows " +
-                      "will request administrator approval. No service or driver is installed, and " +
-                      "the original app is unchanged.",
-            PrimaryButtonText = "Continue",
+            Title = tierD
+                ? "Compatibility Shim requires a managed copy"
+                : "Native isolation requires a Windows profile",
+            Content = tierD
+                ? "This app requires a curated, version-gated compatibility adapter. AppMux will " +
+                  "create a hidden standard Windows account, mirror a private copy, and modify only " +
+                  "that managed copy after verifying exact executable, resource, and patch-signature " +
+                  "hashes. Vendor updates with unknown hashes are refused. The installed original is " +
+                  "unchanged; no service or driver is installed. Windows will request administrator approval."
+                : "This app needs one hidden standard local account for a genuine separate Windows " +
+                  "profile. If the app is installed only for your account, AppMux mirrors a private " +
+                  "runnable copy into that isolated profile. Windows will request administrator " +
+                  "approval. No service or driver is installed, and the original app is unchanged.",
+            PrimaryButtonText = tierD ? "Create Compatibility Shim" : "Continue",
             CloseButtonText = "Cancel",
         };
         if (await warning.ShowDialogAsync() != Wpf.Ui.Controls.MessageBoxResult.Primary)

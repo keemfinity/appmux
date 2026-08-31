@@ -16,9 +16,11 @@ pub struct Instance {
     /// "recipe" (Tier A/B) or "account" (Tier C). Defaults preserve v0.1 data.
     #[serde(default = "default_isolation")]
     pub isolation: String,
-    /// Hidden local account used by Tier C.
+    /// Hidden local account used by Tier C or a Tier D compatibility adapter.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub windows_user: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tier_d_adapter: Option<String>,
     /// Package Family AppUserModelID used by Package Lab instances.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub package_aumid: Option<String>,
@@ -151,6 +153,7 @@ mod tests {
             last_used,
             isolation: default_isolation(),
             windows_user: None,
+            tier_d_adapter: None,
             package_aumid: None,
             protocols: Vec::new(),
             profile_args: Vec::new(),

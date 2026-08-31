@@ -10,9 +10,10 @@ Run multiple isolated instances of Windows apps — separate logins, separate
 settings, side by side. Right-click a shortcut or exe, pick an instance
 ("Work", "Personal", "Client A"), and it launches with its own private data.
 
-AppMux is a *launcher*, not a sandbox. It uses only documented Windows APIs,
-never injects code into target programs, and refuses to run programs that ship
-anti-cheat, DRM, or other kernel components.
+AppMux is a *launcher*, not a sandbox. It uses documented Windows APIs and does
+not modify installed vendor files. Curated Tier D adapters may alter only an
+AppMux-managed copy after explicit consent and exact version/hash checks. Apps
+with anti-cheat, DRM, licensing controls, or kernel components remain unsupported.
 
 > Running multiple copies of a program may breach that program's own terms of
 > service. Checking whether that is allowed is your responsibility. AppMux
@@ -37,6 +38,10 @@ Isolation is tiered per app, driven by a recipe database:
   separate HKCU registry and user profile for classic Win32 apps. Per-user-only
   installations are mirrored into the hidden account's matching profile path so
   the app sees the directory structure it expects without accessing the owner's profile.
+- **Tier D — curated Compatibility Shim**: for exceptional apps that still enforce
+  cross-profile singleton or callback behavior. Each adapter is built in, requires
+  explicit consent, and is gated to exact executable/resource hashes and patch
+  signatures. Unknown versions fail closed instead of receiving a best-effort patch.
 
 ## Manager app
 
@@ -62,9 +67,10 @@ lightest viable route:
 1. verified native/profile recipe,
 2. verified environment profile,
 3. Package Lab (service-free when that is the only removable blocker),
-4. Tier C Windows-user isolation for unknown unpackaged apps,
-5. verified official App Web fallback when the desktop route is prohibited or incompatible,
-6. unsupported with an exact reason.
+4. a version-gated Tier D adapter when an exact built-in compatibility profile matches,
+5. Tier C Windows-user isolation for unknown unpackaged apps,
+6. verified official App Web fallback when the desktop route is prohibited or incompatible,
+7. unsupported with an exact reason.
 
 Use `appmux analyze --target <exe-or-lnk>` to inspect the JSON decision without
 making changes. Account creation, package signing/trust, sideloading, and
@@ -148,12 +154,13 @@ a named Windows job so Stop terminates only that instance and all of its child
 processes. It does not change target-app or WindowsApps ACLs and installs no
 service or driver.
 
-Slack 4.51.191 is verified through Tier C. Slack hardcodes Electron's singleton
-and ignores Chromium profile flags, so AppMux hosts its unchanged `app.asar` in
-the matching official Electron 43.4.0 runtime inside the hidden profile. The
-runtime download is pinned to the vendor SHA-256. Original Slack and the isolated
-Slack window run together with separate HKCU, AppData, Crashpad, and process jobs;
-no Slack binary or application archive is patched or injected.
+Slack 4.51.191 is the first verified Tier D adapter. AppMux verifies exact
+`slack.exe`, `app.asar`, Electron archive, and runtime hashes before changing only
+the managed copy. The adapter applies fixed-length singleton and external-link
+patches, hosts Slack with its matching Electron 43.4.0 runtime, and routes native
+sign-in callbacks to the already-running instance through a private randomized
+named pipe. Tier D never registers Slack callbacks in the owner's profile, so the
+original Slack installation and its `slack://` handler remain independent.
 
 ### Package Lab (experimental packaged-app instances)
 

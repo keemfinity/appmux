@@ -22,6 +22,7 @@ public sealed class InstanceModel
     [JsonPropertyName("last_used")] public ulong LastUsed { get; set; }
     [JsonPropertyName("isolation")] public string Isolation { get; set; } = "recipe";
     [JsonPropertyName("windows_user")] public string? WindowsUser { get; set; }
+    [JsonPropertyName("tier_d_adapter")] public string? TierDAdapter { get; set; }
     [JsonPropertyName("package_aumid")] public string? PackageAumid { get; set; }
     [JsonPropertyName("protocols")] public List<string> Protocols { get; set; } = new();
     [JsonPropertyName("profile_args")] public List<string> ProfileArgs { get; set; } = new();

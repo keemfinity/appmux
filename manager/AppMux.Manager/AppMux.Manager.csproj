@@ -19,6 +19,8 @@
     <PackageReference Include="WPF-UI" Version="3.0.5" />
     <Resource Include="Assets\AppMux.png" />
     <Resource Include="Assets\AppMux.ico" />
+    <None Include="..\..\target\release\appmux.exe" Link="appmux.exe" CopyToPublishDirectory="Always" />
+    <None Include="..\..\target\release\appmuxw.exe" Link="appmuxw.exe" CopyToPublishDirectory="Always" />
   </ItemGroup>
 
 </Project>

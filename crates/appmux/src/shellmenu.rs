@@ -83,6 +83,28 @@ pub fn sync_protocols(db: &Db) -> Result<usize> {
     protocols.dedup();
 
     let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+    let active_classes: std::collections::HashSet<_> = protocols
+        .iter()
+        .map(|protocol| format!("AppMux.Protocol.{protocol}").to_ascii_lowercase())
+        .collect();
+    let stale_classes: Vec<_> = hkcu
+        .open_subkey(r"Software\Classes")
+        .ok()
+        .into_iter()
+        .flat_map(|classes| {
+            classes
+                .enum_keys()
+                .filter_map(Result::ok)
+                .collect::<Vec<_>>()
+        })
+        .filter(|class| {
+            class.to_ascii_lowercase().starts_with("appmux.protocol.")
+                && !active_classes.contains(&class.to_ascii_lowercase())
+        })
+        .collect();
+    for class in stale_classes {
+        let _ = hkcu.delete_subkey_all(format!(r"Software\Classes\{class}"));
+    }
     let capabilities_path = r"Software\AppMux\Capabilities";
     let _ = hkcu.delete_subkey_all(capabilities_path);
     let (capabilities, _) = hkcu.create_subkey(capabilities_path)?;

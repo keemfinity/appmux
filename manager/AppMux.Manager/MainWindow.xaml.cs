@@ -13,6 +13,7 @@ public sealed class InstanceRow
     public bool CanEnableStrongIsolation => Model.Isolation == "recipe";
     public bool IsPackage => Model.Isolation == "package";
     public bool IsAccount => Model.Isolation == "account";
+    public bool IsTierD => !string.IsNullOrWhiteSpace(Model.TierDAdapter);
     public bool IsStoppable => Model.Isolation is "package" or "web" or "account";
     public required string Meta { get; init; }
 }
@@ -50,9 +51,11 @@ public partial class MainWindow
             {
                 Model = i,
                 Icon = Core.IconForInstance(i),
-                Meta = i.Isolation == "account"
-                    ? $"Private Windows profile  ·  Used {Core.FormatAgo(i.LastUsed)}"
-                    : $"{Core.FormatSize(size)}  ·  {i.Isolation switch { "package" => "Private app profile", "web" => "Private web profile", _ => "Private app profile" }}  ·  Used {Core.FormatAgo(i.LastUsed)}",
+                Meta = !string.IsNullOrWhiteSpace(i.TierDAdapter)
+                    ? $"Compatibility Shim  ·  Private Windows profile  ·  Used {Core.FormatAgo(i.LastUsed)}"
+                    : i.Isolation == "account"
+                        ? $"Private Windows profile  ·  Used {Core.FormatAgo(i.LastUsed)}"
+                        : $"{Core.FormatSize(size)}  ·  {i.Isolation switch { "package" => "Private app profile", "web" => "Private web profile", _ => "Private app profile" }}  ·  Used {Core.FormatAgo(i.LastUsed)}",
             };
         }).ToList());
 
