@@ -2299,6 +2299,17 @@ pub fn stop(inst: &Instance, plan: &LaunchPlan) -> Result<()> {
 }
 
 fn instance_job_active(inst: &Instance) -> Result<bool> {
+    let event_name = wide(&stop_event_name(inst));
+    match unsafe { OpenEventW(EVENT_MODIFY_STATE, false, PCWSTR(event_name.as_ptr())) } {
+        Ok(event) => {
+            unsafe {
+                let _ = CloseHandle(event);
+            }
+            return Ok(true);
+        }
+        Err(error) if error.code().0 as u32 == 0x8007_0002 => {}
+        Err(error) => return Err(error).context("opening the isolated instance broker event"),
+    }
     let job_name = format!(
         r"Local\AppMux.TierC.{}",
         account_name(&inst.app_id, &inst.name)
