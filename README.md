@@ -150,9 +150,10 @@ creates one hidden **standard** local account per instance, generates a random
 password protected with Windows DPAPI, initializes Windows Shell known folders,
 and corrects the alternate-user environment before launch. Per-user applications
 are mirrored to the equivalent path in the hidden profile. Managed launches use
-a named Windows job so Stop terminates only that instance and all of its child
-processes. It does not change target-app or WindowsApps ACLs and installs no
-service or driver.
+a per-instance completion-port broker outside the target's named Windows Job
+Object. The broker retains the complete inherited process tree across root-process
+handoffs; Stop signals its versioned control event and terminates only that job.
+It does not change target-app or WindowsApps ACLs and installs no service or driver.
 
 Slack 4.51.191 is the first verified Tier D adapter. AppMux verifies exact
 `slack.exe`, `app.asar`, Electron archive, and runtime hashes before changing only
@@ -246,7 +247,23 @@ precedence over builtins.
 ```
 cargo build --release   # binaries in target\release\
 cargo test
+node --test crates/appmux/src/tier_d_shim.test.js
 ```
+
+Publish the self-contained manager, copy the Rust binaries beside it, then compile
+the local installer without GitHub Actions:
+
+```powershell
+$env:PATH = "$env:LOCALAPPDATA\Microsoft\dotnet;$env:PATH"
+dotnet publish manager/AppMux.Manager/AppMux.Manager.csproj -c Release -r win-x64 --self-contained true -o manager/publish
+Copy-Item target/release/appmux.exe,target/release/appmuxw.exe manager/publish
+& "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe" installer/AppMux.iss
+```
+
+The generated `dist/*-test-signed.exe` name denotes a development artifact signed
+with a local test certificate. Public releases require a CA-issued Authenticode
+certificate or Microsoft Trusted Signing; never describe the test certificate as
+publicly trusted.
 
 ## Data locations
 
