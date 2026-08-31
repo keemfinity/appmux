@@ -66,7 +66,7 @@ public partial class MainWindow
     private async void OnLaunch(object sender, RoutedEventArgs e)
     {
         if ((sender as Button)?.Tag is not InstanceRow row) return;
-        var (code, output) = await Core.RunAppmuxAsync(
+        var (code, output) = await Core.RunAppmuxLaunchAsync(
             "run", "--target", row.Model.AppPath,
             "--app", row.Model.AppId,
             "--instance", row.Model.Name);

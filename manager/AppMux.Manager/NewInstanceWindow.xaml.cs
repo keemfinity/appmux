@@ -9,6 +9,8 @@ public partial class NewInstanceWindow
     private readonly string _target;
     private readonly bool _standalone;
     private bool _packageLab;
+    private bool _busy;
+    private string _defaultCreateText = "Create and launch";
     private AutoAnalysisModel? _analysis;
 
     public NewInstanceWindow(string target, bool standalone, bool packageLab = false)
@@ -22,7 +24,8 @@ public partial class NewInstanceWindow
             : Path.GetFileName(target);
         if (packageLab)
         {
-            CreateButton.Content = "Build and install test instance";
+            _defaultCreateText = "Build and install test instance";
+            CreateButton.Content = _defaultCreateText;
             ErrorText.Text = "This copies and repackages the app locally; it may take several minutes.";
             ErrorText.Visibility = Visibility.Visible;
         }
@@ -50,9 +53,14 @@ public partial class NewInstanceWindow
                     CreateButton.IsEnabled = false;
                     ShowError(_analysis.Reason);
                 }
-                else if (_packageLab)
+                else
                 {
-                    CreateButton.Content = "Build and install test instance";
+                    CreateButton.IsEnabled = true;
+                    if (_packageLab)
+                    {
+                        _defaultCreateText = "Build and install test instance";
+                        CreateButton.Content = _defaultCreateText;
+                    }
                 }
             }
             catch (Exception error)
@@ -70,21 +78,37 @@ public partial class NewInstanceWindow
 
     private void OnNameKeyDown(object sender, KeyEventArgs e)
     {
+        if (_busy) return;
         if (e.Key == Key.Enter) OnCreate(sender, e);
         if (e.Key == Key.Escape) Close();
     }
 
-    private void OnCancel(object sender, RoutedEventArgs e) => Close();
+    private void OnCancel(object sender, RoutedEventArgs e)
+    {
+        if (!_busy) Close();
+    }
 
     private async void OnCreate(object sender, RoutedEventArgs e)
     {
+        if (_busy) return;
         var name = NameBox.Text.Trim();
         if (!IsValidName(name))
         {
-            ShowError("Use 1-32 characters: letters, digits, space, '-', '_', '.'");
+            ShowError("Use 1-32 characters containing letters, digits, spaces, hyphens, underscores, or periods.");
             return;
         }
+        try
+        {
+            await CreateInstance(name);
+        }
+        catch (Exception error)
+        {
+            FailProgress(error.Message);
+        }
+    }
 
+    private async Task CreateInstance(string name)
+    {
         if (!Core.IsTermsAccepted())
         {
             var notice = new Wpf.Ui.Controls.MessageBox
@@ -107,7 +131,6 @@ public partial class NewInstanceWindow
             }
         }
 
-        CreateButton.IsEnabled = false;
         if (_analysis?.Route == "web-app")
         {
             await CreateWebInstance(name);
@@ -124,15 +147,15 @@ public partial class NewInstanceWindow
             return;
         }
 
-        var (code, output) = await Core.RunAppmuxAsync(
+        BeginProgress("Creating the instance...", 25);
+        var (code, output) = await Core.RunAppmuxLaunchAsync(
             "run", "--target", _target, "--instance", name);
         if (code != 0)
         {
-            CreateButton.IsEnabled = true;
-            ShowError(string.IsNullOrWhiteSpace(output) ? "Launch failed." : output);
+            FailProgress(string.IsNullOrWhiteSpace(output) ? "Launch failed." : output);
             return;
         }
-        Close();
+        await CompleteProgress();
     }
 
     private async Task CreateWebInstance(string name)
@@ -154,17 +177,15 @@ public partial class NewInstanceWindow
             CreateButton.IsEnabled = true;
             return;
         }
-        CreateButton.Content = "Opening isolated web app...";
-        var result = await Core.RunAppmuxAsync(
+        BeginProgress("Opening the isolated web app...", 45);
+        var result = await Core.RunAppmuxLaunchAsync(
             "web", "create", "--target", _target, "--instance", name);
         if (result.Code != 0)
         {
-            CreateButton.IsEnabled = true;
-            CreateButton.Content = "Create and launch";
-            ShowError(result.Output);
+            FailProgress(result.Output);
             return;
         }
-        Close();
+        await CompleteProgress();
     }
 
     private async Task CreateTierCInstance(string name)
@@ -194,34 +215,33 @@ public partial class NewInstanceWindow
             CreateButton.IsEnabled = true;
             return;
         }
+        BeginProgress("Creating the instance record...", 15);
         var created = await Core.RunAppmuxAsync(
             "run", "--target", _target, "--instance", name, "--create-only");
         if (created.Code != 0)
         {
-            CreateButton.IsEnabled = true;
-            ShowError(created.Output);
+            FailProgress(created.Output);
             return;
         }
-        CreateButton.Content = "Waiting for administrator approval...";
+        SetProgress("Waiting for administrator approval...", 35, true);
         var elevated = await Core.RunElevatedAppmuxAsync(
             "tier-c", "prepare", "--app", _analysis.AppId, "--instance", name);
         if (elevated != 0)
         {
-            CreateButton.IsEnabled = true;
-            CreateButton.Content = "Create and launch";
-            if (elevated != 1223)
-                ShowError($"Strong isolation setup failed ({elevated}). The instance card was kept so setup can be retried.");
+            FailProgress(elevated == 1223
+                ? "Administrator approval was cancelled."
+                : $"Strong isolation setup failed ({elevated}). The instance card was kept so setup can be retried.");
             return;
         }
-        var launch = await Core.RunAppmuxAsync(
+        SetProgress("Isolation is ready. Launching the app...", 82);
+        var launch = await Core.RunAppmuxLaunchAsync(
             "run", "--target", _target, "--app", _analysis.AppId, "--instance", name);
         if (launch.Code != 0)
         {
-            CreateButton.IsEnabled = true;
-            ShowError(launch.Output);
+            FailProgress(launch.Output);
             return;
         }
-        Close();
+        await CompleteProgress();
     }
 
     private async Task CreatePackageLabInstance(string name)
@@ -260,8 +280,8 @@ public partial class NewInstanceWindow
                 return;
             }
         }
+        BeginProgress("Copying the package...", 12);
         await Core.RunAppmuxAsync("dev", "on");
-        CreateButton.Content = "Copying package...";
         var prepareArgs = new List<string>
         {
             "package-lab", "prepare", "--target", _target, "--instance", name,
@@ -272,9 +292,7 @@ public partial class NewInstanceWindow
         if (prepare.Code != 0)
         {
             await Core.RunAppmuxAsync("dev", "off");
-            CreateButton.IsEnabled = true;
-            CreateButton.Content = "Retry";
-            ShowError(prepare.Output);
+            FailProgress(prepare.Output);
             return;
         }
 
@@ -285,56 +303,94 @@ public partial class NewInstanceWindow
         };
         foreach (var args in steps)
         {
-            CreateButton.Content = args[1] == "pack" ? "Packing MSIX..." : "Signing test package...";
+            SetProgress(args[1] == "pack" ? "Packing the MSIX..." : "Signing the test package...",
+                args[1] == "pack" ? 35 : 55);
             var (code, output) = await Core.RunAppmuxAsync(args);
             if (code != 0)
             {
                 await Core.RunAppmuxAsync("dev", "off");
-                CreateButton.IsEnabled = true;
-                CreateButton.Content = "Retry";
-                ShowError(output);
+                FailProgress(output);
                 return;
             }
         }
 
         if (!Core.IsPackageLabCertificateMachineTrusted())
         {
-            CreateButton.Content = "Waiting for administrator approval...";
+            SetProgress("Waiting for administrator approval...", 68, true);
             var code = await Core.RunElevatedAppmuxAsync(
                 "package-lab", "trust-machine", "--target", _target, "--instance", name,
                 "--confirm-machine-trust");
             if (code != 0)
             {
                 await Core.RunAppmuxAsync("dev", "off");
-                CreateButton.IsEnabled = true;
-                CreateButton.Content = "Retry";
-                ShowError(code == 1223 ? "Administrator approval was cancelled." : $"Certificate trust failed ({code}).");
+                FailProgress(code == 1223
+                    ? "Administrator approval was cancelled."
+                    : $"Certificate trust failed ({code}).");
                 return;
             }
         }
 
-        CreateButton.Content = "Installing test package...";
+        SetProgress("Installing the test package...", 82);
         var install = await Core.RunAppmuxAsync(
             "package-lab", "install", "--target", _target, "--instance", name, "--confirm-sideload");
         if (install.Code != 0)
         {
             await Core.RunAppmuxAsync("dev", "off");
-            CreateButton.IsEnabled = true;
-            CreateButton.Content = "Retry";
-            ShowError(install.Output);
+            FailProgress(install.Output);
             return;
         }
+        SetProgress("Registering the new instance...", 94);
         var adopt = await Core.RunAppmuxAsync(
             "package-lab", "adopt", "--target", _target, "--instance", name);
         await Core.RunAppmuxAsync("dev", "off");
         if (adopt.Code != 0)
         {
-            CreateButton.IsEnabled = true;
-            CreateButton.Content = "Retry";
-            ShowError(adopt.Output);
+            FailProgress(adopt.Output);
             return;
         }
-        Close();
+        await CompleteProgress();
+    }
+
+    private void BeginProgress(string message, double value)
+    {
+        _busy = true;
+        NameBox.IsEnabled = false;
+        CreateButton.IsEnabled = false;
+        CreateButton.Content = "Working...";
+        CancelButton.IsEnabled = false;
+        ErrorText.Visibility = Visibility.Collapsed;
+        ProgressPanel.Visibility = Visibility.Visible;
+        SetProgress(message, value);
+    }
+
+    private void SetProgress(string message, double value, bool indeterminate = false)
+    {
+        CreateProgress.IsIndeterminate = indeterminate;
+        CreateProgress.Value = value;
+        ProgressText.Text = message;
+    }
+
+    private async Task CompleteProgress()
+    {
+        SetProgress("Instance ready. The app has launched.", 100);
+        CreateButton.Content = "Complete";
+        await Task.Delay(650);
+        if (_standalone)
+            Close();
+        else
+            DialogResult = true;
+    }
+
+    private void FailProgress(string message)
+    {
+        _busy = false;
+        NameBox.IsEnabled = true;
+        CreateButton.IsEnabled = true;
+        CreateButton.Content = "Retry";
+        CancelButton.IsEnabled = true;
+        ProgressPanel.Visibility = Visibility.Visible;
+        SetProgress("Setup stopped. Review the message and try again.", 0);
+        ShowError(string.IsNullOrWhiteSpace(message) ? "The operation failed." : message);
     }
 
     private void ShowError(string message)

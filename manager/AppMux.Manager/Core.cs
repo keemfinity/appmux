@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.IO;
+using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using System.Security.Cryptography.X509Certificates;
@@ -376,11 +377,36 @@ public static class Core
             RedirectStandardError = true,
         };
         foreach (var a in args) psi.ArgumentList.Add(a);
+        var stdout = new StringBuilder();
+        var stderr = new StringBuilder();
+        using var p = new Process { StartInfo = psi };
+        p.OutputDataReceived += (_, e) => { if (e.Data is not null) lock (stdout) stdout.AppendLine(e.Data); };
+        p.ErrorDataReceived += (_, e) => { if (e.Data is not null) lock (stderr) stderr.AppendLine(e.Data); };
+        p.Start();
+        p.BeginOutputReadLine();
+        p.BeginErrorReadLine();
+        await p.WaitForExitAsync();
+        await Task.Delay(50);
+        try { p.CancelOutputRead(); } catch (InvalidOperationException) { }
+        try { p.CancelErrorRead(); } catch (InvalidOperationException) { }
+        string output;
+        lock (stdout) lock (stderr) output = (stdout.ToString() + "\n" + stderr.ToString()).Trim();
+        return (p.ExitCode, output);
+    }
+
+    public static async Task<(int Code, string Output)> RunAppmuxLaunchAsync(params string[] args)
+    {
+        var exe = FindAppmux() ?? throw new FileNotFoundException(
+            "appmux.exe not found next to the manager or in target\\release.");
+        var psi = new ProcessStartInfo(exe)
+        {
+            UseShellExecute = false,
+            CreateNoWindow = true,
+        };
+        foreach (var a in args) psi.ArgumentList.Add(a);
         using var p = Process.Start(psi)!;
-        var stdoutTask = p.StandardOutput.ReadToEndAsync();
-        var stderrTask = p.StandardError.ReadToEndAsync();
-        await Task.WhenAll(stdoutTask, stderrTask, p.WaitForExitAsync());
-        return (p.ExitCode, (stdoutTask.Result + "\n" + stderrTask.Result).Trim());
+        await p.WaitForExitAsync();
+        return (p.ExitCode, p.ExitCode == 0 ? "" : $"AppMux exited with code {p.ExitCode}.");
     }
 
     public static bool IsPackageLabCertificateMachineTrusted()

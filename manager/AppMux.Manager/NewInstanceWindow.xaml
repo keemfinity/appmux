@@ -60,6 +60,22 @@
                     Foreground="{DynamicResource AccentTextBrush}"
                     Text="Auto route: analyzing..."
                     TextWrapping="Wrap" />
+                <StackPanel
+                    x:Name="ProgressPanel"
+                    Margin="1,12,0,0"
+                    Visibility="Collapsed">
+                    <ProgressBar
+                        x:Name="CreateProgress"
+                        Height="6"
+                        Minimum="0"
+                        Maximum="100" />
+                    <TextBlock
+                        x:Name="ProgressText"
+                        Margin="0,7,0,0"
+                        FontSize="11"
+                        Foreground="{DynamicResource SubtleTextBrush}"
+                        TextWrapping="Wrap" />
+                </StackPanel>
                 <TextBlock
                     x:Name="ErrorText"
                     Margin="1,6,0,0"
@@ -84,6 +100,7 @@
             HorizontalAlignment="Right"
             Orientation="Horizontal">
             <ui:Button
+                x:Name="CancelButton"
                 Margin="0,0,8,0"
                 Click="OnCancel"
                 Content="Cancel" />
@@ -92,6 +109,7 @@
                 Appearance="Primary"
                 Click="OnCreate"
                 Content="Create and launch"
+                IsEnabled="False"
                 Icon="{ui:SymbolIcon Play24}" />
         </StackPanel>
     </Grid>
