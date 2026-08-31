@@ -364,10 +364,10 @@ public static class Core
         };
         foreach (var a in args) psi.ArgumentList.Add(a);
         using var p = Process.Start(psi)!;
-        var stdout = await p.StandardOutput.ReadToEndAsync();
-        var stderr = await p.StandardError.ReadToEndAsync();
-        await p.WaitForExitAsync();
-        return (p.ExitCode, (stdout + "\n" + stderr).Trim());
+        var stdoutTask = p.StandardOutput.ReadToEndAsync();
+        var stderrTask = p.StandardError.ReadToEndAsync();
+        await Task.WhenAll(stdoutTask, stderrTask, p.WaitForExitAsync());
+        return (p.ExitCode, (stdoutTask.Result + "\n" + stderrTask.Result).Trim());
     }
 
     public static bool IsPackageLabCertificateMachineTrusted()

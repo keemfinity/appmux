@@ -166,6 +166,9 @@ pub fn launch(plan: &LaunchPlan, data_dir: &Path) -> Result<u32> {
     }
 
     let child = cmd
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
         .spawn()
         .with_context(|| format!("launching {}", plan.exe.display()))?;
     Ok(child.id())

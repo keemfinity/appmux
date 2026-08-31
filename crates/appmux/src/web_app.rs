@@ -54,6 +54,9 @@ pub fn launch(instance: &Instance) -> Result<u32> {
             "--disable-default-apps",
         ])
         .current_dir(browser.parent().unwrap_or(Path::new(r"C:\")))
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
         .spawn()
         .with_context(|| format!("launching {} in App Web mode", browser.display()))?;
     Ok(child.id())
