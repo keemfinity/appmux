@@ -85,6 +85,28 @@ public partial class NewInstanceWindow
             return;
         }
 
+        if (!Core.IsTermsAccepted())
+        {
+            var notice = new Wpf.Ui.Controls.MessageBox
+            {
+                Title = "Before creating an instance",
+                Content = "AppMux runs multiple copies of a program with separate settings. " +
+                          "Running multiple copies may breach that program's own terms of service. " +
+                          "Checking whether that is allowed is your responsibility.",
+                PrimaryButtonText = "I understand and continue",
+                CloseButtonText = "Cancel",
+            };
+            if (await notice.ShowDialogAsync() != Wpf.Ui.Controls.MessageBoxResult.Primary) return;
+            var accepted = await Core.RunAppmuxAsync("accept-tos");
+            if (accepted.Code != 0)
+            {
+                ShowError(string.IsNullOrWhiteSpace(accepted.Output)
+                    ? "Unable to save terms acceptance."
+                    : accepted.Output);
+                return;
+            }
+        }
+
         CreateButton.IsEnabled = false;
         if (_analysis?.Route == "web-app")
         {

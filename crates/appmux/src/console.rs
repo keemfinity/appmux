@@ -77,6 +77,11 @@ pub fn confirm(msg: &str) -> bool {
     if use_gui() {
         message_box("AppMux", msg, MB_YESNO | MB_ICONWARNING) == IDYES
     } else {
+        use std::io::IsTerminal;
+        if !std::io::stdin().is_terminal() {
+            eprintln!("notice must be accepted interactively or with 'appmux accept-tos'");
+            return false;
+        }
         println!("{msg}");
         print!("Continue? [y/N] ");
         use std::io::Write;

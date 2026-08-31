@@ -62,6 +62,19 @@ public static class Core
     public static string DataRoot =>
         Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "AppMux");
 
+    public static bool IsTermsAccepted()
+    {
+        try
+        {
+            var file = Path.Combine(DataRoot, "config.json");
+            if (!File.Exists(file)) return false;
+            using var json = JsonDocument.Parse(File.ReadAllText(file));
+            return json.RootElement.TryGetProperty("tos_accepted", out var accepted)
+                && accepted.ValueKind is JsonValueKind.True;
+        }
+        catch { return false; }
+    }
+
     public static string FriendlyAppName(InstanceModel instance)
     {
         (string? Name, ImageSource? Icon) packageVisual = instance.Isolation is "package" or "web"
