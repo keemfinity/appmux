@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use windows::core::{PCWSTR, PWSTR};
 use windows::Win32::Foundation::{
     CloseHandle, DuplicateHandle, LocalFree, BOOL, DUPLICATE_SAME_ACCESS, E_ACCESSDENIED, HANDLE,
-    HLOCAL, WAIT_OBJECT_0, WAIT_TIMEOUT,
+    HLOCAL, INVALID_HANDLE_VALUE, WAIT_OBJECT_0, WAIT_TIMEOUT,
 };
 use windows::Win32::NetworkManagement::NetManagement::{
     NERR_UserExists, NetUserAdd, NetUserDel, UF_DONT_EXPIRE_PASSWD, UF_NORMAL_ACCOUNT, UF_SCRIPT,
@@ -33,19 +33,25 @@ use windows::Win32::Security::{
 use windows::Win32::System::Environment::{CreateEnvironmentBlock, DestroyEnvironmentBlock};
 use windows::Win32::System::JobObjects::{
     AssignProcessToJobObject, CreateJobObjectW, IsProcessInJob,
-    JobObjectBasicAccountingInformation, OpenJobObjectW, QueryInformationJobObject,
-    TerminateJobObject, JOBOBJECT_BASIC_ACCOUNTING_INFORMATION,
+    JobObjectAssociateCompletionPortInformation, JobObjectBasicAccountingInformation,
+    JobObjectExtendedLimitInformation, OpenJobObjectW, QueryInformationJobObject,
+    SetInformationJobObject, TerminateJobObject, JOBOBJECT_ASSOCIATE_COMPLETION_PORT,
+    JOBOBJECT_BASIC_ACCOUNTING_INFORMATION, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+    JOB_OBJECT_LIMIT_DIE_ON_UNHANDLED_EXCEPTION, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
 };
 use windows::Win32::System::StationsAndDesktops::{
     CloseDesktop, CloseWindowStation, OpenDesktopW, OpenWindowStationW, DESKTOP_CONTROL_FLAGS,
 };
-use windows::Win32::System::SystemServices::JOB_OBJECT_TERMINATE;
-use windows::Win32::System::Threading::{
-    CreateProcessWithLogonW, GetCurrentProcess, GetExitCodeProcess, OpenProcess, ResumeThread,
-    TerminateProcess, WaitForSingleObject, CREATE_BREAKAWAY_FROM_JOB, CREATE_SUSPENDED,
-    CREATE_UNICODE_ENVIRONMENT, LOGON_WITH_PROFILE, PROCESS_INFORMATION, PROCESS_SYNCHRONIZE,
-    STARTUPINFOW,
+use windows::Win32::System::SystemServices::{
+    JOB_OBJECT_MSG_ACTIVE_PROCESS_ZERO, JOB_OBJECT_QUERY, JOB_OBJECT_TERMINATE,
 };
+use windows::Win32::System::Threading::{
+    CreateEventW, CreateProcessWithLogonW, GetCurrentProcess, GetExitCodeProcess, OpenEventW,
+    OpenProcess, ResumeThread, SetEvent, TerminateProcess, WaitForSingleObject,
+    CREATE_BREAKAWAY_FROM_JOB, CREATE_NO_WINDOW, CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT,
+    EVENT_MODIFY_STATE, LOGON_WITH_PROFILE, PROCESS_INFORMATION, PROCESS_SYNCHRONIZE, STARTUPINFOW,
+};
+use windows::Win32::System::IO::{CreateIoCompletionPort, GetQueuedCompletionStatus};
 use winreg::enums::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_WRITE};
 use winreg::RegKey;
 
@@ -78,6 +84,13 @@ pub fn account_name(app_id: &str, instance: &str) -> String {
         hash = hash.wrapping_mul(0x100000001b3);
     }
     format!("amx_{hash:016x}")
+}
+
+fn stop_event_name(inst: &Instance) -> String {
+    format!(
+        r"Local\AppMux.StopEvent.v1.{}",
+        account_name(&inst.app_id, &inst.name)
+    )
 }
 
 fn random_password() -> Result<String> {
@@ -852,6 +865,81 @@ unsafe fn corrected_environment(block: *mut c_void, username: &str) -> Vec<u16> 
     output
 }
 
+fn configure_broker_job(job: HANDLE) -> Result<HANDLE> {
+    let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+    limits.BasicLimitInformation.LimitFlags =
+        JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_DIE_ON_UNHANDLED_EXCEPTION;
+    unsafe {
+        SetInformationJobObject(
+            job,
+            JobObjectExtendedLimitInformation,
+            &limits as *const _ as *const c_void,
+            std::mem::size_of_val(&limits) as u32,
+        )
+        .context("setting Job Object broker limits")?;
+    }
+    let completion = unsafe {
+        CreateIoCompletionPort(INVALID_HANDLE_VALUE, None, 0, 1)
+            .context("creating the Job Object completion port")?
+    };
+    let association = JOBOBJECT_ASSOCIATE_COMPLETION_PORT {
+        CompletionKey: job.0,
+        CompletionPort: completion,
+    };
+    if let Err(error) = unsafe {
+        SetInformationJobObject(
+            job,
+            JobObjectAssociateCompletionPortInformation,
+            &association as *const _ as *const c_void,
+            std::mem::size_of_val(&association) as u32,
+        )
+    } {
+        unsafe {
+            let _ = CloseHandle(completion);
+        }
+        return Err(error).context("associating the Job Object completion port");
+    }
+    Ok(completion)
+}
+
+fn wait_for_job_to_empty(job: HANDLE, completion: HANDLE, stop_event: HANDLE) -> Result<()> {
+    let mut stopping = false;
+    loop {
+        if !stopping && unsafe { WaitForSingleObject(stop_event, 0) } == WAIT_OBJECT_0 {
+            unsafe {
+                TerminateJobObject(job, 0)?;
+            }
+            stopping = true;
+        }
+        let mut message = 0u32;
+        let mut key = 0usize;
+        let mut overlapped = std::ptr::null_mut();
+        match unsafe {
+            GetQueuedCompletionStatus(completion, &mut message, &mut key, &mut overlapped, 1000)
+        } {
+            Ok(()) if key == job.0 as usize && message == JOB_OBJECT_MSG_ACTIVE_PROCESS_ZERO => {
+                return Ok(())
+            }
+            Ok(()) => continue,
+            Err(error) if error.code().0 as u32 == 0x8007_0102 => {}
+            Err(error) => return Err(error).context("waiting for Job Object completion"),
+        }
+        let mut accounting = JOBOBJECT_BASIC_ACCOUNTING_INFORMATION::default();
+        unsafe {
+            QueryInformationJobObject(
+                job,
+                JobObjectBasicAccountingInformation,
+                &mut accounting as *mut _ as *mut c_void,
+                std::mem::size_of_val(&accounting) as u32,
+                None,
+            )?;
+        }
+        if accounting.ActiveProcesses == 0 {
+            return Ok(());
+        }
+    }
+}
+
 fn spawn_with_password(
     username: &str,
     password: &str,
@@ -861,7 +949,7 @@ fn spawn_with_password(
     visible_desktop: bool,
     wait: bool,
     job_name: Option<&str>,
-    _allow_job_fallback: bool,
+    wait_for_job_tree: bool,
 ) -> Result<u32> {
     let user_w = wide(username);
     let pass_w = wide(password);
@@ -913,6 +1001,23 @@ fn spawn_with_password(
             grant_job_access(job, username)
                 .context("granting the isolated account access to its Job Object")?;
         }
+        let completion = if wait_for_job_tree {
+            Some(configure_broker_job(
+                job.context("completion-port broker requires a Job Object")?,
+            )?)
+        } else {
+            None
+        };
+        let stop_event = if wait_for_job_tree {
+            job_name.context("completion-port broker requires a named Job Object")?;
+            let name_w = wide(&format!(r"Local\AppMux.StopEvent.v1.{username}"));
+            Some(
+                CreateEventW(None, true, false, PCWSTR(name_w.as_ptr()))
+                    .context("creating the isolated instance stop event")?,
+            )
+        } else {
+            None
+        };
         let flags = if job.is_some() {
             CREATE_UNICODE_ENVIRONMENT | CREATE_SUSPENDED | CREATE_BREAKAWAY_FROM_JOB
         } else {
@@ -944,6 +1049,11 @@ fn spawn_with_password(
                     IsProcessInJob(process.hProcess, None, &mut inherited_job)
                         .context("IsProcessInJob failed for the alternate-user process")?;
                     if inherited_job.as_bool() {
+                        if wait_for_job_tree {
+                            AssignProcessToJobObject(job, process.hProcess).context(
+                                "AssignProcessToJobObject failed for the nested isolated instance",
+                            )?;
+                        }
                         if ResumeThread(process.hThread) == u32::MAX {
                             return Err(windows::core::Error::from_win32()).context(
                                 "ResumeThread failed for the process in its inherited Job Object",
@@ -953,35 +1063,53 @@ fn spawn_with_password(
                     }
                     AssignProcessToJobObject(job, process.hProcess)
                         .context("AssignProcessToJobObject failed for the isolated instance")?;
-                    let mut remote_job = HANDLE::default();
-                    DuplicateHandle(
-                        GetCurrentProcess(),
-                        job,
-                        process.hProcess,
-                        &mut remote_job,
-                        0,
-                        false,
-                        DUPLICATE_SAME_ACCESS,
-                    )
-                    .context("DuplicateHandle failed while retaining the isolated Job Object")?;
+                    if !wait_for_job_tree {
+                        let mut remote_job = HANDLE::default();
+                        DuplicateHandle(
+                            GetCurrentProcess(),
+                            job,
+                            process.hProcess,
+                            &mut remote_job,
+                            0,
+                            false,
+                            DUPLICATE_SAME_ACCESS,
+                        )
+                        .context(
+                            "DuplicateHandle failed while retaining the isolated Job Object",
+                        )?;
+                    }
                     if ResumeThread(process.hThread) == u32::MAX {
                         return Err(windows::core::Error::from_win32())
                             .context("ResumeThread failed for the isolated process");
                     }
                     Ok(())
                 })();
-                let _ = CloseHandle(job);
+                if !wait_for_job_tree || result.is_err() {
+                    let _ = CloseHandle(job);
+                }
                 result
             } else {
                 Ok(())
             }
         } else {
+            if let Some(stop_event) = stop_event {
+                let _ = CloseHandle(stop_event);
+            }
+            if let Some(completion) = completion {
+                let _ = CloseHandle(completion);
+            }
             if let Some(job) = job {
                 let _ = CloseHandle(job);
             }
             Ok(())
         };
         if let Err(error) = managed {
+            if let Some(stop_event) = stop_event {
+                let _ = CloseHandle(stop_event);
+            }
+            if let Some(completion) = completion {
+                let _ = CloseHandle(completion);
+            }
             if !process.hProcess.is_invalid() {
                 let _ = TerminateProcess(process.hProcess, 1);
             }
@@ -1004,7 +1132,16 @@ fn spawn_with_password(
         };
         let mut exit_code = None;
         let mut waited = true;
-        if created.is_ok() && wait {
+        if created.is_ok() && wait_for_job_tree {
+            wait_for_job_to_empty(
+                job.context("completion-port broker lost its Job Object")?,
+                completion.context("completion-port broker lost its completion port")?,
+                stop_event.context("completion-port broker lost its stop event")?,
+            )?;
+            let mut code = 0;
+            GetExitCodeProcess(process.hProcess, &mut code)?;
+            exit_code = Some(code);
+        } else if created.is_ok() && wait {
             waited = WaitForSingleObject(process.hProcess, 180_000) == WAIT_OBJECT_0;
             if waited {
                 let mut code = 0;
@@ -1022,6 +1159,17 @@ fn spawn_with_password(
         if !process.hProcess.is_invalid() {
             let _ = CloseHandle(process.hProcess);
         }
+        if wait_for_job_tree {
+            if let Some(stop_event) = stop_event {
+                let _ = CloseHandle(stop_event);
+            }
+            if let Some(completion) = completion {
+                let _ = CloseHandle(completion);
+            }
+            if let Some(job) = job {
+                let _ = CloseHandle(job);
+            }
+        }
         if environment_created {
             let _ = DestroyEnvironmentBlock(environment);
         }
@@ -1030,6 +1178,9 @@ fn spawn_with_password(
         Ok::<(u32, bool, Option<u32>), anyhow::Error>((pid, waited, exit_code))
     }?;
     let (pid, waited, exit_code) = result;
+    if wait_for_job_tree {
+        return Ok(pid);
+    }
     anyhow::ensure!(waited, "alternate-user process timed out after 180 seconds");
     if !wait {
         if let Some(code) = exit_code.filter(|code| *code != 0) {
@@ -2080,6 +2231,20 @@ fn stop_image(inst: &Instance, image: &str) -> Result<()> {
 }
 
 fn terminate_instance_job(inst: &Instance) -> Result<bool> {
+    let event_name = wide(&stop_event_name(inst));
+    match unsafe { OpenEventW(EVENT_MODIFY_STATE, false, PCWSTR(event_name.as_ptr())) } {
+        Ok(event) => {
+            let result = unsafe { SetEvent(event) };
+            unsafe {
+                let _ = CloseHandle(event);
+            }
+            result?;
+            std::thread::sleep(std::time::Duration::from_secs(2));
+            return Ok(true);
+        }
+        Err(error) if error.code().0 as u32 == 0x8007_0002 => {}
+        Err(error) => return Err(error).context("opening the isolated instance stop event"),
+    }
     let job_name = format!(
         r"Local\AppMux.TierC.{}",
         account_name(&inst.app_id, &inst.name)
@@ -2133,7 +2298,70 @@ pub fn stop(inst: &Instance, plan: &LaunchPlan) -> Result<()> {
     stop_image(inst, &image)
 }
 
-pub fn launch(inst: &Instance, plan: &LaunchPlan) -> Result<u32> {
+fn instance_job_active(inst: &Instance) -> Result<bool> {
+    let job_name = format!(
+        r"Local\AppMux.TierC.{}",
+        account_name(&inst.app_id, &inst.name)
+    );
+    let job_w = wide(&job_name);
+    let job = match unsafe { OpenJobObjectW(JOB_OBJECT_QUERY, false, PCWSTR(job_w.as_ptr())) } {
+        Ok(job) => job,
+        Err(error) if error.code().0 as u32 == 0x8007_0002 => return Ok(false),
+        Err(error) => return Err(error).context("opening the isolated instance Job Object"),
+    };
+    let mut accounting = JOBOBJECT_BASIC_ACCOUNTING_INFORMATION::default();
+    let result = unsafe {
+        QueryInformationJobObject(
+            job,
+            JobObjectBasicAccountingInformation,
+            &mut accounting as *mut _ as *mut c_void,
+            std::mem::size_of_val(&accounting) as u32,
+            None,
+        )
+    };
+    unsafe {
+        let _ = CloseHandle(job);
+    }
+    result?;
+    Ok(accounting.ActiveProcesses > 0)
+}
+
+pub fn launch(inst: &Instance, _plan: &LaunchPlan) -> Result<u32> {
+    if instance_job_active(inst)? {
+        return Ok(0);
+    }
+    let current = std::env::current_exe()?;
+    let broker = current.with_file_name("appmux.exe");
+    let executable = if broker.exists() { broker } else { current };
+    let mut command = std::process::Command::new(executable);
+    command
+        .args(["tier-c", "broker", "--app"])
+        .arg(&inst.app_id)
+        .arg("--instance")
+        .arg(&inst.name)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped());
+    use std::os::windows::process::CommandExt;
+    command.creation_flags(CREATE_NO_WINDOW.0 | CREATE_BREAKAWAY_FROM_JOB.0);
+    let mut child = command.spawn()?;
+    let pid = child.id();
+    std::thread::sleep(std::time::Duration::from_secs(3));
+    if let Some(status) = child.try_wait()? {
+        let mut stderr = String::new();
+        if let Some(mut stream) = child.stderr.take() {
+            let _ = stream.read_to_string(&mut stderr);
+        }
+        anyhow::ensure!(
+            status.success(),
+            "instance broker exited during startup with {status}: {}",
+            stderr.trim()
+        );
+    }
+    Ok(pid)
+}
+
+pub fn broker_launch(inst: &Instance, plan: &LaunchPlan) -> Result<u32> {
     let username = inst
         .windows_user
         .as_deref()
@@ -2192,7 +2420,7 @@ pub fn launch(inst: &Instance, plan: &LaunchPlan) -> Result<u32> {
         true,
         false,
         Some(&job),
-        false,
+        true,
     )
 }
 

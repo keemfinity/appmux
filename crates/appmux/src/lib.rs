@@ -278,6 +278,13 @@ enum TierCCmd {
         uri: Option<String>,
     },
     #[command(hide = true)]
+    Broker {
+        #[arg(long)]
+        app: String,
+        #[arg(long)]
+        instance: String,
+    },
+    #[command(hide = true)]
     DeferHostElectron {
         #[arg(long)]
         wait_pid: u32,
@@ -1283,6 +1290,14 @@ fn tier_c(cmd: TierCCmd) -> Result<()> {
         TierCCmd::InitProfile { .. }
         | TierCCmd::HostElectron { .. }
         | TierCCmd::DeferHostElectron { .. } => unreachable!(),
+        TierCCmd::Broker { app, instance } => {
+            let inst = db
+                .find(&app, &instance)
+                .ok_or_else(|| anyhow::anyhow!("no instance '{instance}' for app '{app}'"))?;
+            let plan = launch::plan(&inst.app_path)?;
+            account::broker_launch(inst, &plan)?;
+            Ok(())
+        }
         TierCCmd::Prepare { app, instance } => {
             let inst = db
                 .find(&app, &instance)
