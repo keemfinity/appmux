@@ -169,8 +169,10 @@ credentials. AppMux verifies the Figma executable, archive, native modules,
 FigmaAgent, and official Electron 42.9.2 runtime, then runs a patched managed
 archive under the owner account with a private user-data root. Native
 side-by-side windows, persistent profile data, duplicate prevention, and exact
-PID-tree Stop are verified. Authentication and `figma://` callback completion
-remain pending runtime verification, so this adapter remains partial.
+PID-tree Stop are verified. The managed host extracts Figma's signed executable
+icon and applies it to hosted windows and taskbar identity instead of exposing
+Electron branding. Authentication and `figma://` callback completion remain
+pending runtime verification, so this adapter remains partial.
 
 ### Package Lab (experimental packaged-app instances)
 

@@ -1,0 +1,12 @@
+const electron = require('electron');
+const path = require('path');
+const value = name => process.argv.find(arg => arg.startsWith(`--${name}=`))?.slice(name.length + 3);
+const target = value('shim-target');
+const icon = value('icon');
+const appId = value('app-user-model-id');
+if (!target?.endsWith('app.asar') || !path.isAbsolute(target) || !path.isAbsolute(icon) || !appId) electron.app.exit(2);
+electron.app.setAppUserModelId(appId);
+electron.app.on('browser-window-created', (_, window) => { try { window.setIcon(icon); } catch {} });
+electron.app.setAppPath(target);
+process.argv = [process.execPath];
+require(target);

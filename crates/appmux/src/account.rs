@@ -2049,6 +2049,34 @@ fn owner_host_root(inst: &Instance) -> PathBuf {
     inst.data_dir().join("OwnerHost")
 }
 
+fn extract_managed_icon(source: &Path, destination: &Path) -> Result<()> {
+    let script = destination.with_extension("icon.ps1");
+    std::fs::write(&script, "param([string]$Source,[string]$Destination)\n$ErrorActionPreference='Stop'\nAdd-Type -AssemblyName System.Drawing\n$icon=[Drawing.Icon]::ExtractAssociatedIcon($Source)\nif(-not $icon){throw 'No application icon found'}\n$stream=[IO.File]::Create($Destination)\ntry{$icon.Save($stream)}finally{$stream.Dispose();$icon.Dispose()}\n")?;
+    let output = std::process::Command::new("powershell.exe")
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+        ])
+        .arg(&script)
+        .arg("-Source")
+        .arg(source)
+        .arg("-Destination")
+        .arg(destination)
+        .output()?;
+    let _ = std::fs::remove_file(script);
+    anyhow::ensure!(
+        output.status.success()
+            && std::fs::metadata(destination).is_ok_and(|value| value.len() > 0),
+        "extracting vendor icon failed:\n{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    Ok(())
+}
+
 pub fn prepare_owner_host(inst: &Instance, plan: &LaunchPlan) -> Result<()> {
     anyhow::ensure!(
         plan.recipe.tier_d_owner_host,
@@ -2105,13 +2133,20 @@ pub fn prepare_owner_host(inst: &Instance, plan: &LaunchPlan) -> Result<()> {
         &resources.join("FigmaAgent"),
         &runtime.join("resources").join("FigmaAgent"),
     )?;
+    let icon = app.join("app.ico");
+    extract_managed_icon(&plan.exe, &icon)?;
+    let tray = app.join("assets").join("tray");
+    std::fs::create_dir_all(&tray)?;
+    for name in ["iconLight.ico", "iconDark.ico"] {
+        std::fs::copy(&icon, tray.join(name))?;
+    }
     let shim = root.join("Shim");
     std::fs::create_dir_all(&shim)?;
     std::fs::write(
         shim.join("package.json"),
         r#"{"name":"figma","productName":"Figma","version":"126.8.16","main":"main.js"}"#,
     )?;
-    std::fs::write(shim.join("main.js"), "const path = require('path');\nrequire(path.resolve(__dirname, '..', 'App', 'app.asar'));\n")?;
+    std::fs::write(shim.join("main.js"), include_str!("tier_d_owner_shim.js"))?;
     std::fs::create_dir_all(root.join("UserData"))?;
     Ok(())
 }
@@ -2191,8 +2226,18 @@ pub fn launch_owner_host(inst: &Instance, plan: &LaunchPlan) -> Result<u32> {
             path.display()
         );
     }
+    let app_id = format!("AppMux.Figma.{}", crate::paths::sanitize(&inst.name));
     let mut command = std::process::Command::new(runtime);
     command.arg(root.join("Shim"));
+    command.arg(format!(
+        "--shim-target={}",
+        root.join("App").join("app.asar").display()
+    ));
+    command.arg(format!(
+        "--icon={}",
+        root.join("App").join("app.ico").display()
+    ));
+    command.arg(format!("--app-user-model-id={app_id}"));
     command.arg(format!(
         "--user-data-dir={}",
         root.join("UserData").display()
@@ -2989,6 +3034,10 @@ mod tests {
         ]
         .concat();
         assert!(patch_figma_archive(&mut duplicate).is_err());
+        let shim = include_str!("tier_d_owner_shim.js");
+        assert!(shim.contains("browser-window-created"));
+        assert!(shim.contains("window.setIcon(icon)"));
+        assert!(shim.contains("electron.app.setAppUserModelId(appId)"));
         for hash in [
             FIGMA_126816_EXE_SHA256,
             FIGMA_126816_ASAR_SHA256,
