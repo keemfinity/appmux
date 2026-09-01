@@ -935,8 +935,11 @@ fn remove(app: &str, instance: &str, purge: bool) -> Result<()> {
         if stored.isolation == "web" {
             web_app::stop(stored)?;
         }
-        if stored.isolation == "owner-host" && stored.last_pid.is_some() {
-            account::stop_owner_host(stored)?;
+        if stored.isolation == "owner-host" {
+            if stored.last_pid.is_some() {
+                account::stop_owner_host(stored)?;
+            }
+            shortcut::remove_start_menu_identity(stored)?;
         }
     }
     let data_dir = removed.as_ref().map(Instance::data_dir);

@@ -2140,6 +2140,7 @@ pub fn prepare_owner_host(inst: &Instance, plan: &LaunchPlan) -> Result<()> {
     for name in ["iconLight.ico", "iconDark.ico"] {
         std::fs::copy(&icon, tray.join(name))?;
     }
+    crate::shortcut::register_start_menu_identity(inst, &plan.display, &icon)?;
     let shim = root.join("Shim");
     std::fs::create_dir_all(&shim)?;
     std::fs::write(
@@ -2226,7 +2227,7 @@ pub fn launch_owner_host(inst: &Instance, plan: &LaunchPlan) -> Result<u32> {
             path.display()
         );
     }
-    let app_id = format!("AppMux.Figma.{}", crate::paths::sanitize(&inst.name));
+    let app_id = crate::shortcut::app_user_model_id(inst);
     let mut command = std::process::Command::new(runtime);
     command.arg(root.join("Shim"));
     command.arg(format!(
