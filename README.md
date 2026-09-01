@@ -174,8 +174,11 @@ icon and applies it to hosted windows and taskbar identity instead of exposing
 Electron branding. The bootstrap suppresses hosted protocol registration and
 preserves its Shim/profile arguments across relaunches so Figma cannot replace
 the vendor `figma://` handler with an invalid `electron.js` command.
-Authentication and `figma://` callback completion remain
-pending runtime verification, so this adapter remains partial.
+Authentication is verified through a private WebView2 profile and packaged
+protocol broker. Windows activation receives `figma:` without a normal callback
+command line, forwards it through the one waiting private pipe, and dispatches
+Figma's exact `additionalData.originalArgs` shape. Login persists across Stop
+and relaunch while the original vendor handler remains unchanged.
 
 ### Package Lab (experimental packaged-app instances)
 

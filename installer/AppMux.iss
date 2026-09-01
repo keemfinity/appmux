@@ -41,15 +41,18 @@ Name: "desktopicon"; Description: "Create a desktop shortcut"; GroupDescription:
 
 [Files]
 Source: "{#PublishDir}\*"; DestDir: "{app}"; Excludes: "*.pdb"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "..\dist\AppMux-CallbackBroker-0.1.0.msix"; DestDir: "{app}"; DestName: "AppMux.CallbackBroker.msix"; Flags: ignoreversion
 
 [Icons]
 Name: "{group}\AppMux"; Filename: "{app}\{#MyAppExeName}"
 Name: "{autodesktop}\AppMux"; Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon
 
 [Run]
+Filename: "powershell.exe"; Parameters: "-NoProfile -NonInteractive -ExecutionPolicy Bypass -Command ""Add-AppxPackage -Path '{app}\AppMux.CallbackBroker.msix' -ForceApplicationShutdown"""; Flags: runhidden waituntilterminated
 Filename: "{app}\appmux.exe"; Parameters: "menu sync"; Flags: runhidden waituntilterminated
 Filename: "{app}\appmux.exe"; Parameters: "protocol sync"; Flags: runhidden waituntilterminated
 Filename: "{app}\{#MyAppExeName}"; Description: "Launch AppMux"; Flags: nowait postinstall skipifsilent
 
 [UninstallRun]
+Filename: "powershell.exe"; Parameters: "-NoProfile -NonInteractive -ExecutionPolicy Bypass -Command ""Get-AppxPackage Keemfinity.AppMux.CallbackBroker | Remove-AppxPackage"""; Flags: runhidden waituntilterminated; RunOnceId: "RemoveAppMuxCallbackBroker"
 Filename: "{app}\appmux.exe"; Parameters: "menu remove"; Flags: runhidden waituntilterminated; RunOnceId: "RemoveAppMuxMenu"

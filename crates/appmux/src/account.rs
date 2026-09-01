@@ -2049,6 +2049,37 @@ fn owner_host_root(inst: &Instance) -> PathBuf {
     inst.data_dir().join("OwnerHost")
 }
 
+fn auth_broker_executable() -> Result<PathBuf> {
+    let current = std::env::current_exe()?;
+    let local = current.with_file_name("AppMux.Manager.exe");
+    if local.is_file() {
+        return Ok(local);
+    }
+    let mut directory = current.parent();
+    while let Some(path) = directory {
+        if path.join("Cargo.toml").is_file() {
+            for candidate in [
+                path.join("manager")
+                    .join("publish")
+                    .join("AppMux.Manager.exe"),
+                path.join("manager")
+                    .join("AppMux.Manager")
+                    .join("bin")
+                    .join("Release")
+                    .join("net8.0-windows10.0.19041.0")
+                    .join("win-x64")
+                    .join("AppMux.Manager.exe"),
+            ] {
+                if candidate.is_file() {
+                    return Ok(candidate);
+                }
+            }
+        }
+        directory = path.parent();
+    }
+    bail!("AppMux authentication broker is unavailable")
+}
+
 fn extract_managed_icon(source: &Path, destination: &Path) -> Result<()> {
     let script = destination.with_extension("icon.ps1");
     std::fs::write(&script, "param([string]$Source,[string]$Destination)\n$ErrorActionPreference='Stop'\nAdd-Type -AssemblyName System.Drawing\n$icon=[Drawing.Icon]::ExtractAssociatedIcon($Source)\nif(-not $icon){throw 'No application icon found'}\n$stream=[IO.File]::Create($Destination)\ntry{$icon.Save($stream)}finally{$stream.Dispose();$icon.Dispose()}\n")?;
@@ -2149,6 +2180,7 @@ pub fn prepare_owner_host(inst: &Instance, plan: &LaunchPlan) -> Result<()> {
     )?;
     std::fs::write(shim.join("main.js"), include_str!("tier_d_owner_shim.js"))?;
     std::fs::create_dir_all(root.join("UserData"))?;
+    std::fs::create_dir_all(root.join("AuthWebView"))?;
     Ok(())
 }
 
@@ -2239,6 +2271,22 @@ pub fn launch_owner_host(inst: &Instance, plan: &LaunchPlan) -> Result<u32> {
         root.join("App").join("app.ico").display()
     ));
     command.arg(format!("--app-user-model-id={app_id}"));
+    command.arg(format!(
+        "--auth-broker={}",
+        auth_broker_executable()?.display()
+    ));
+    command.arg(format!(
+        "--auth-profile={}",
+        root.join("AuthWebView").display()
+    ));
+    command.arg(format!(
+        "--waiting-dir={}",
+        crate::paths::root().join("AuthWaiting").display()
+    ));
+    command.arg(format!(
+        "--status={}",
+        root.join("auth-status.jsonl").display()
+    ));
     command.arg(format!(
         "--user-data-dir={}",
         root.join("UserData").display()
@@ -3039,6 +3087,9 @@ mod tests {
         assert!(shim.contains("browser-window-created"));
         assert!(shim.contains("window.setIcon(icon)"));
         assert!(shim.contains("electron.app.setAppUserModelId(appId)"));
+        assert!(shim.contains("if (input.length < length + 4) return;"));
+        assert!(shim.contains("{ originalArgs }"));
+        assert!(!shim.contains("report(candidate"));
         for hash in [
             FIGMA_126816_EXE_SHA256,
             FIGMA_126816_ASAR_SHA256,
